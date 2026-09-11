@@ -1,0 +1,232 @@
+// formurl.nv — `application/x-www-form-urlencoded`, to the WHATWG
+// rules.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// AN ORDERED PAIR LIST, NOT A MAP.  `tag=a&tag=b` is two tags, and a
+// map would have had to pick one — which is exactly what a checkbox
+// group, a multi-select and a repeated query parameter all send.  So
+// the parse answers a list, `get` answers the FIRST value and
+// `get_all` answers every one, and the order is the body's own because
+// a server that reorders a form has changed what the client said.
+//
+// EVERY PAIR IS A PAIR OF SPANS into the caller's own bytes.  Nothing
+// is copied until somebody asks: `key_str` and `value_str` decode one
+// field, and a handler that looks at three of a hundred fields pays for
+// three.  `FormPair` holds four integers and no string at all.
+//
+// WHICH RULES, EXACTLY.  The WHATWG URL Standard's
+// `application/x-www-form-urlencoded` parser and serialiser, which is
+// what a browser implements and therefore what a server receives.  It
+// is NOT urllib's, and § The overlap with url-nv in the README lists
+// the four places the two disagree.  The one worth repeating here: the
+// WHATWG parser has no `keep_blank_values` knob — a field with no value
+// is a key with an empty value, always — because a browser sends one
+// for a text input the user left alone, and a parser that dropped it
+// would make "the user cleared this field" indistinguishable from "the
+// field was not on the form".
+
+use formscan
+use formerr
+
+// A byte range into the body: `[start, end)`.
+//
+// Half-open, because that is the only convention under which an empty
+// range at a position is expressible — which is what a key with no
+// value has.
+pub struct FormSpan
+    start: Int
+    end: Int
+
+// One `key=value` of a body, as spans into it.
+//
+// Four integers.  The strings are `key_str` and `value_str`, and they
+// are calls rather than fields because decoding is what allocates.
+pub struct FormPair
+    key: FormSpan
+    value: FormSpan
+    // Whether the field carried an `=` at all.  A bare `key` is a key
+    // with an empty value under the standard, and this is how a caller
+    // that wants to tell the two apart can.
+    had_assigner: Bool
+
+// A parsed body: the bytes, and the pairs over them.
+//
+// The bytes are held so that `key_str` and `value_str` need only the
+// body, and so that a handler can carry one value through its own
+// request scope without carrying the caller's buffer beside it.
+pub struct FormBody
+    bytes: Bytes
+    pairs: [FormPair]
+    // Whether any field carried a `%` that began no valid escape.  The
+    // standard KEEPS such a byte and carries on, which is what this
+    // does; the flag is how a caller stricter than the standard finds
+    // out.
+    had_bad_escape: Bool
+
+// ── Parsing ──────────────────────────────────────────────────────────
+
+// Read a body.
+//
+// Cannot fail, and that is the standard's decision rather than this
+// package's: the WHATWG parser has no error case at all.  An empty
+// body is an empty list, a `%` that begins no escape is a literal `%`,
+// a field with no `=` is a key with an empty value, and a field that is
+// entirely empty (`a=1&&b=2`) is skipped.  A caller that wants to
+// refuse any of those asks `had_bad_escape` or counts the pairs.
+//
+// ```novo
+// use formurl
+// use std.bytes
+// use std.list
+//
+// fn main() [io]
+//     let b = formurl.parse(bytes.from_str("tag=a&tag=b&name=ada+lovelace"))
+//     println("${list.len(b.pairs)}")
+// ```
+pub fn parse(body: Bytes) -> FormBody []
+    todo("form-nv.formurl.parse")
+
+// Read a body out of a string.
+//
+// The same call for a caller that has a query string rather than a
+// request body — which is the other place this encoding turns up, and
+// the reason `parse` does not insist on `Bytes`.
+pub fn parse_str(body: Str) -> FormBody []
+    todo("form-nv.formurl.parse_str")
+
+// Read a body, refusing one with more than `max_pairs` fields.
+//
+// The bound a server puts on a request it did not write.  A form with
+// ten thousand fields is not a form; it is one packet and a list
+// allocation per field, and the refusal is what turns that from a
+// memory decision the client makes into one the server made.
+pub fn parse_bounded(body: Bytes, max_pairs: Int) -> Result<FormBody, formerr.FormError> []
+    todo("form-nv.formurl.parse_bounded")
+
+// ── Reading ──────────────────────────────────────────────────────────
+
+// The first value carried by a key, decoded, or `None`.
+//
+// FIRST and not last: a body is read left to right, and the first
+// occurrence is the one a form's own reader sees.  A caller that needs
+// the others has `get_all`.
+pub fn get(b: FormBody, key: Str) -> ?Str []
+    todo("form-nv.formurl.get")
+
+// Every value carried by a key, decoded, in the order they were
+// written.
+//
+// The reason `parse` answers a list and not a map.
+pub fn get_all(b: FormBody, key: Str) -> [Str] []
+    todo("form-nv.formurl.get_all")
+
+// Whether a key is present at all.
+//
+// Distinct from `get(b, k) == Some("")`: a checkbox that was not
+// ticked is absent, and one that was ticked with no value is present
+// and empty.
+pub fn has(b: FormBody, key: Str) -> Bool []
+    todo("form-nv.formurl.has")
+
+// How many fields carry a key.
+pub fn count(b: FormBody, key: Str) -> Int []
+    todo("form-nv.formurl.count")
+
+// Every key in the body, each once, in the order first seen.
+//
+// What a handler listing what it was sent walks, and what a check for
+// unexpected fields compares against its own list.
+pub fn keys(b: FormBody) -> [Str] []
+    todo("form-nv.formurl.keys")
+
+// One pair's key, decoded.
+pub fn key_str(b: FormBody, p: FormPair) -> Str []
+    todo("form-nv.formurl.key_str")
+
+// One pair's value, decoded.
+pub fn value_str(b: FormBody, p: FormPair) -> Str []
+    todo("form-nv.formurl.value_str")
+
+// One pair's value as bytes, decoded.
+//
+// A form field is not necessarily text: a hidden field can carry
+// base64, and a client that percent-encoded arbitrary bytes into one is
+// within the standard.  Decoding to `Str` would make that field
+// unreadable without saying so.
+pub fn value_bytes(b: FormBody, p: FormPair) -> Bytes []
+    todo("form-nv.formurl.value_bytes")
+
+// The span a key occupies in the body, for a caller that wants the
+// position rather than the text.
+pub fn span_bytes(b: FormBody, s: FormSpan) -> Bytes []
+    todo("form-nv.formurl.span_bytes")
+
+// How many bytes a span's DECODED form is.
+//
+// Answered by walking rather than by decoding, so a caller checking a
+// field against a size limit does not allocate to find out it is too
+// big.
+pub fn decoded_len(b: FormBody, s: FormSpan) -> Int []
+    todo("form-nv.formurl.decoded_len")
+
+// ── Writing ──────────────────────────────────────────────────────────
+
+// Pairs written back out, to the WHATWG serialiser.
+//
+// A space becomes `+`, a safe byte stays, everything else becomes
+// `%XX` in UPPER CASE, and the safe set is the standard's — letters,
+// digits, `*`, `-`, `.`, `_`, and NOT `~`.  Round-trips with `parse`
+// for any pair list.
+//
+// ```novo
+// use formurl
+//
+// fn main() [io]
+//     println(formurl.serialise([("q", "a b"), ("n", "1&2")]))
+// ```
+pub fn serialise(pairs: [(Str, Str)]) -> Str []
+    todo("form-nv.formurl.serialise")
+
+// Pairs written into a buffer the caller sized.
+//
+// Appends at `off` and answers the buffer; `serialised_len` is how big
+// it needs to be.  The shape for a caller building a request body
+// without an allocation per field.
+pub fn serialise_into(out: Bytes, off: Int, pairs: [(Str, Str)]) -> Bytes []
+    todo("form-nv.formurl.serialise_into")
+
+// How many bytes `serialise` would produce.
+pub fn serialised_len(pairs: [(Str, Str)]) -> Int []
+    todo("form-nv.formurl.serialised_len")
+
+// One string percent-encoded under the form rules.
+//
+// Published because a caller building a URL's query by hand wants
+// exactly it, and because a second copy of the safe set is a second
+// place for it to be wrong.
+pub fn encode(value: Str) -> Str []
+    todo("form-nv.formurl.encode")
+
+// One string percent-decoded under the form rules: `+` is a space, a
+// bad `%` is a literal `%`.
+pub fn decode(value: Str) -> Str []
+    todo("form-nv.formurl.decode")
+
+// Whether a string would survive `encode` unchanged.
+//
+// The question a caller asks before deciding whether writing a field
+// costs an allocation.
+pub fn is_safe(value: Str) -> Bool []
+    todo("form-nv.formurl.is_safe")
+
+// ── The scanner, for a caller that drives its own walk ───────────────
+
+// The scan after feeding a whole body, for a caller that wants the
+// scanner's answer without the pair list.
+//
+// The bridge to `formscan`: this module's parse IS that scanner with
+// the spans collected, and this call is how a host caller reaches the
+// device half without writing the loop.
+pub fn scan_all(body: Bytes) -> formscan.FormScan []
+    todo("form-nv.formurl.scan_all")

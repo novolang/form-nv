@@ -1,0 +1,222 @@
+// formscan.nv — the urlencoded scanner, as `@value` state.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THIS MODULE IS THE DEVICE CLAIM.  A firmware serving its own
+// configuration page gets back `ssid=home&psk=hunter2&chan=6` and has
+// four kilobytes of RAM.  What it cannot do is what
+// `str.split(body, "&")` does — allocate a list of strings, then split
+// each of those again, then percent-decode each half into another
+// string.  What it can do is walk the body once, a byte at a time,
+// carrying four integers in its own stack frame, and that is exactly
+// what `FormScan` is.  Every field is an `Int`, the struct is `@value`,
+// and a scan of a body has no heap in it at all.
+//
+// THE HOST HALF USES THE SAME MACHINE.  `formurl` walks a body with
+// this scanner and reports keys and values as spans into the caller's
+// own bytes — so the property the device needs, "nothing is copied", is
+// the property the host gets for free.  The two halves are not two
+// implementations of a walk; they are one walk, called from two places.
+//
+// WHAT THE `@value` SHAPE COSTS, SAID PLAINLY.  A `@value` struct holds
+// scalars only (SPEC § 14.2), so nothing here names a `Str` or a
+// `Bytes`: the caller feeds bytes and reads offsets, and turning an
+// offset into text is the caller's own slice on the host and never
+// happens at all on a device.  A refusal has nowhere to go either,
+// because a `Result` payload is not a position a `@value` type may
+// occupy (SPEC § 14.5) — so the facts a caller would have read off one
+// are flags on the scan instead, and `scan_bad_escape` is the one that
+// matters.  base64-nv's decoder and router-nv's segment scanner answer
+// the same constraint the same way.
+//
+// AND DECODING IS PART OF THE WALK, not a pass over a copy.  The WHATWG
+// parser turns `+` into a space and `%XX` into a byte, and both are
+// decisions about ONE byte — so `scan_byte` answers the decoded byte
+// along with the position, and a device writes it straight into its own
+// fixed buffer without ever building the encoded form.
+
+// The pair separator, as an integer: `&`.
+//
+// Public because a device that wants to find the next separator itself
+// — a memchr over a buffer — needs the byte this scanner agrees with,
+// and two spellings of `38` in two files is one place for them to
+// disagree.
+pub fn separator() -> Int []
+    todo("form-nv.formscan.separator")
+
+// The key/value separator, as an integer: `=`.
+pub fn assigner() -> Int []
+    todo("form-nv.formscan.assigner")
+
+// The byte `+` stands for: a space.
+pub fn plus_means() -> Int []
+    todo("form-nv.formscan.plus_means")
+
+// A body walk in progress: four integers and no allocation.
+//
+// The whole state a device carries while reading one form body.  Copied
+// by value into and out of every step, which is what makes the walk
+// re-startable: a server that has to wait for more bytes keeps the
+// struct and resumes.
+pub @value
+struct FormScan
+    // Byte offset of the next byte to feed.  Counts every byte the scan
+    // has seen, separators and escapes included, so it is a position in
+    // the ENCODED body.
+    pos: Int
+    // Byte offset where the current field begins — one past the
+    // separator that opened it.
+    field_start: Int
+    // How many complete fields the scan has closed.  `a=1&b=2` closes
+    // two.
+    field_index: Int
+    // Bit flags and the escape accumulator together: whether a field or
+    // a key just closed, whether the scan is inside a `%XX` escape and
+    // how far, whether a bad escape has been seen, and whether the
+    // current field has had its `=` yet.  Read with the predicates
+    // below rather than by masking, so the bit positions stay this
+    // module's business.
+    flags: Int
+
+// A fresh scan, before any byte.
+//
+// ```novo
+// use formscan
+//
+// fn main() [io]
+//     println("${formscan.scan_pos(formscan.scan())}")
+// ```
+pub fn scan() -> FormScan []
+    todo("form-nv.formscan.scan")
+
+// Feed one encoded byte and answer the scan after it.
+//
+// The byte is never stored: a scan that remembered bytes would need a
+// buffer, and a buffer is the thing this shape exists to avoid.  What
+// the caller reads afterwards is `scan_out` — the DECODED byte this
+// step produced, when it produced one — and the boundary predicates.
+pub fn scan_byte(s: FormScan, byte: Int) -> FormScan []
+    todo("form-nv.formscan.scan_byte")
+
+// Tell the scan the body has ended.
+//
+// Closes the open field, if there is one, and settles the flags.  A
+// scan that is never ended has a final field nobody counted, which is
+// the bug this call exists to make impossible to write.
+pub fn scan_end(s: FormScan) -> FormScan []
+    todo("form-nv.formscan.scan_end")
+
+// ── What a step produced ─────────────────────────────────────────────
+
+// Whether the byte just fed produced a decoded byte.
+//
+// False for a `%`, for the first digit after one, and for a separator:
+// those are structure rather than content.  True for an ordinary byte,
+// for a `+`, and for the second digit of an escape — which is where the
+// escape's byte comes out.
+pub fn scan_emitted(s: FormScan) -> Bool []
+    todo("form-nv.formscan.scan_emitted")
+
+// The decoded byte the last step produced, or -1 when it produced none.
+//
+// `+` answers 32.  `%2F` answers 47, on the step that fed the `F`.
+pub fn scan_out(s: FormScan) -> Int []
+    todo("form-nv.formscan.scan_out")
+
+// Whether the decoded byte belongs to the current field's KEY rather
+// than to its value.
+//
+// A device writing into two fixed buffers asks this per byte, which is
+// the whole of the dispatch it needs.
+pub fn scan_in_key(s: FormScan) -> Bool []
+    todo("form-nv.formscan.scan_in_key")
+
+// Whether the byte just fed ended the key: it was the `=`.
+pub fn scan_key_done(s: FormScan) -> Bool []
+    todo("form-nv.formscan.scan_key_done")
+
+// Whether the byte just fed closed a field: it was the `&`, or the
+// `scan_end` that closed the last one.
+pub fn scan_field_done(s: FormScan) -> Bool []
+    todo("form-nv.formscan.scan_field_done")
+
+// ── Reading the scan ─────────────────────────────────────────────────
+
+// The offset of the next byte to feed.
+pub fn scan_pos(s: FormScan) -> Int []
+    todo("form-nv.formscan.scan_pos")
+
+// Where the current field starts, in the encoded body.
+pub fn scan_field_start(s: FormScan) -> Int []
+    todo("form-nv.formscan.scan_field_start")
+
+// How many fields have closed.
+pub fn scan_fields(s: FormScan) -> Int []
+    todo("form-nv.formscan.scan_fields")
+
+// Whether the current field has seen its `=` yet.
+//
+// A field with no `=` at all is a key with an empty value, which is
+// what the WHATWG parser says and what a browser sends for a checkbox
+// nobody named — so this is a fact about the field rather than an
+// error.
+pub fn scan_has_value(s: FormScan) -> Bool []
+    todo("form-nv.formscan.scan_has_value")
+
+// Whether the scan is part-way through a `%XX` escape.
+//
+// True after a `%` and after its first digit.  A body that ends here
+// has a truncated escape, which `scan_end` turns into `scan_bad_escape`.
+pub fn scan_in_escape(s: FormScan) -> Bool []
+    todo("form-nv.formscan.scan_in_escape")
+
+// Whether the scan has seen a `%` that began no valid escape.
+//
+// THE ONE REFUSAL A `@value` STATE CAN CARRY, and it is a flag rather
+// than a `Result` because a `@value` struct may not be a `Result`
+// payload.  The WHATWG parser KEEPS a bad `%` as a literal byte and
+// carries on — which is what this scanner does, so a device's answer is
+// a browser's answer — and this flag is how a caller that wants to be
+// stricter than the standard finds out.
+pub fn scan_bad_escape(s: FormScan) -> Bool []
+    todo("form-nv.formscan.scan_bad_escape")
+
+// ── The byte arithmetic ──────────────────────────────────────────────
+//
+// Published because a device assembling or checking a field by hand
+// needs exactly these, and because the host half must not have a second
+// copy of them.
+
+// The value of a hexadecimal digit, or -1 when the byte is not one.
+//
+// Both cases, because `%2f` and `%2F` are the same byte to every
+// browser and to the standard.
+pub fn hex_value(byte: Int) -> Int []
+    todo("form-nv.formscan.hex_value")
+
+// The hexadecimal digit for a value from 0 to 15, in upper case.
+//
+// Upper case because the WHATWG serialiser says so, and a serialiser
+// that disagreed would produce a body that round-trips to the same
+// value and compares unequal — which is how a signature over a form
+// body stops verifying.
+pub fn hex_digit(value: Int) -> Int []
+    todo("form-nv.formscan.hex_digit")
+
+// Whether a byte may appear in an urlencoded body without an escape.
+//
+// THE WHATWG SET, WHICH IS NOT urllib's.  ASCII letters, digits, `*`,
+// `-`, `.` and `_` — and NOT `~`, which `urllib.parse.quote_plus`
+// leaves alone.  A serialiser that kept `~` produces a body a
+// conforming implementation percent-decodes to the same string and
+// compares unequal, which is the same class of bug as the hex case.
+pub fn byte_safe(byte: Int) -> Bool []
+    todo("form-nv.formscan.byte_safe")
+
+// How many bytes one byte serialises to: 1 for a safe byte, 1 for a
+// space (which becomes `+`), and 3 for everything else.
+//
+// What a device sizing a fixed output buffer adds up before it writes
+// anything.
+pub fn encoded_len(byte: Int) -> Int []
+    todo("form-nv.formscan.encoded_len")

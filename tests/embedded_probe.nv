@@ -1,0 +1,126 @@
+// embedded_probe.nv — this package's device claim, as a program that
+// either builds for a Cortex-M or does not.
+//
+// It is not a test.  `scripts/shard_audit.sh`'s `core-embedded` row
+// copies it and the modules it names into a package of its own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.
+//
+// WHAT THE CLAIM COVERS.  `formscan`, and only `formscan`.  A firmware
+// serving its own configuration page gets back
+// `ssid=home&psk=hunter2&chan=6` and has four kilobytes of RAM; what it
+// needs from this package is to walk that body once and drop each
+// decoded byte into a fixed buffer of its own.  What it cannot do is
+// what the host half does — `formurl.parse` builds a list of pairs and
+// `formpart` holds a pending buffer, and both name `Bytes`, which does
+// not link at the embedded tier.
+//
+// So the device path is integers: bytes in, decoded bytes and boundary
+// flags out, and four fields of `@value` state carried in the caller's
+// own frame.  `formurl`, `formpart`, `formfield` and `formerr` are NOT
+// in the probe and are not claimed, and the README says which half is
+// which.
+//
+// WHAT THE TIER ACTUALLY CHECKS AT 0.0.1 is narrower than it will be,
+// and saying so is more useful than pretending otherwise: every body
+// under `src/` is a `todo()`, so what links today is the SIGNATURES and
+// the types — integers in and out, and a `@value` struct of four fields
+// passed and returned whole.  There is no decoder in the binary yet, so
+// this probe does not prove the decoder fits; it proves that nothing in
+// the shape of the device surface needs an allocator or a host.
+// Keeping it green with the decoder in is a named cost of the
+// implementation step.
+
+use formscan
+
+// Feed one body and fold every answer into one number, so that a single
+// comparison decides the run.
+//
+// A firmware image has one line of output; making it depend on all of
+// them is what stops a passing run from meaning "the first call
+// linked".
+//
+// THE BODY IS SPELLED AS BYTES rather than as a string, because a
+// `Str` does not link at this tier — which is the constraint the whole
+// module is shaped by, demonstrated rather than described.
+@tier(rt)
+fn score() -> Int
+    var n = 0
+    // The vocabulary as integers, which is the whole device path.
+    if formscan.separator() == 38
+        n = n + 1
+    if formscan.assigner() == 61
+        n = n + 1
+    if formscan.plus_means() == 32
+        n = n + 1
+    // `a=1&b=2`, one byte at a time, with nothing held anywhere.
+    var s = formscan.scan()
+    if formscan.scan_pos(s) == 0
+        n = n + 1
+    s = formscan.scan_byte(s, 97)
+    if formscan.scan_in_key(s)
+        n = n + 1
+    s = formscan.scan_byte(s, 61)
+    if formscan.scan_key_done(s)
+        n = n + 1
+    s = formscan.scan_byte(s, 49)
+    if formscan.scan_emitted(s)
+        n = n + 1
+    if formscan.scan_out(s) == 49
+        n = n + 1
+    s = formscan.scan_byte(s, 38)
+    if formscan.scan_field_done(s)
+        n = n + 1
+    s = formscan.scan_byte(s, 98)
+    s = formscan.scan_byte(s, 61)
+    s = formscan.scan_byte(s, 50)
+    s = formscan.scan_end(s)
+    if formscan.scan_fields(s) == 2
+        n = n + 1
+    // The two decisions that make this a decoder rather than a
+    // splitter, each one byte wide.
+    var p = formscan.scan_byte(formscan.scan(), 43)
+    if formscan.scan_out(p) == 32
+        n = n + 1
+    var e = formscan.scan()
+    e = formscan.scan_byte(e, 37)
+    e = formscan.scan_byte(e, 50)
+    if formscan.scan_in_escape(e)
+        n = n + 1
+    e = formscan.scan_byte(e, 70)
+    if formscan.scan_out(e) == 47
+        n = n + 1
+    // And the byte arithmetic a device sizing its own output buffer
+    // uses before it writes anything.
+    if formscan.hex_value(70) == 15
+        n = n + 1
+    if formscan.hex_value(102) == 15
+        n = n + 1
+    if formscan.hex_digit(15) == 70
+        n = n + 1
+    if formscan.byte_safe(97)
+        n = n + 1
+    if formscan.byte_safe(126) == false
+        n = n + 1
+    if formscan.encoded_len(97) == 1
+        n = n + 1
+    if formscan.encoded_len(47) == 3
+        n = n + 1
+    n
+
+@tier(rt)
+fn main() [hw, time]
+    bsp.board.init()
+    // 20 is the number of checks in `score` on the path a linked build
+    // takes.  The count is printed on a failure rather than only
+    // compared, so a device that disagrees with the host says HOW MANY
+    // it lost and a bisect has somewhere to start.
+    let n = score()
+    if n == 20
+        hal.uart.write("PASS: form-embedded\n")
+    else
+        hal.uart.write("FAIL: form-embedded\n")
+    loop
+        core.rt.sleep_ms(1000)

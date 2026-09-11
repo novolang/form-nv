@@ -1,0 +1,157 @@
+// formerr.nv — every refusal, and the field it is about.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// TWO KINDS OF REFUSAL LIVE HERE AND THEY GO TO DIFFERENT PLACES.
+//
+// A LIMIT refusal — a part too large, too many parts, a body too long —
+// is about the request being hostile or the endpoint being
+// misconfigured, and it ends the connection.  `status_for` answers 413
+// for these, which is the status a client can act on.
+//
+// A FIELD refusal — missing, not an integer, out of range — is about a
+// person having filled a form in wrongly, and it goes back to them as
+// a 400 with the field's NAME in it.  That is the whole reason every
+// field variant carries the name: a handler that wrote the conversion
+// by hand has no name to put in the response, and the 400 a person gets
+// says nothing they can act on.
+//
+// `status_for` is published because the mapping is a decision and two
+// handlers making it separately will disagree — and because the wrong
+// one is a real failure: a 500 for a bad form field tells a
+// client to retry, and a client that retries a malformed form retries
+// forever.
+
+// What went wrong.
+pub enum FormError
+    // ── The parse ────────────────────────────────────────────────────
+    // A `Content-Type` that is not `multipart/form-data`.
+    FormNotMultipart(found: Str)
+    // A `multipart/form-data` header with no `boundary` parameter, or
+    // one RFC 2046 does not admit.
+    FormNoBoundary(header: Str)
+    // A part whose `Content-Disposition` carries no `name` parameter.
+    // RFC 7578 § 4.2 requires one, and a part without a name is a part
+    // no handler can look up.
+    FormNoFieldName(part_index: Int)
+    // A part with no `Content-Disposition` at all.
+    FormNoDisposition(part_index: Int)
+    // A header line inside a part that is not `Name: value`.
+    FormBadHeader(part_index: Int, at: Int)
+    // The stream ended before the closing boundary.  The difference
+    // between "the upload failed" and "the upload is complete", and the
+    // reason `finish` exists.
+    FormTruncated(part_index: Int, at: Int)
+
+    // ── The limits, each refused AT the byte the bound was crossed ───
+    // One part's body exceeded `max_part_bytes`.
+    FormPartTooLarge(part_index: Int, name: Str, limit: Int)
+    // The whole body exceeded `max_total_bytes`.
+    FormBodyTooLarge(limit: Int)
+    // More parts than `max_parts`.
+    FormTooManyParts(limit: Int)
+    // One part's header section exceeded `max_headers_bytes`.
+    FormHeadersTooLarge(part_index: Int, limit: Int)
+    // More header fields in one part than `max_headers`.
+    FormTooManyHeaders(part_index: Int, limit: Int)
+    // A field name longer than `max_name_bytes`.  A name is a key a
+    // handler looks up; one of a megabyte is not a key.
+    FormNameTooLong(part_index: Int, limit: Int)
+    // An urlencoded body with more fields than `parse_bounded` allows.
+    FormTooManyPairs(limit: Int)
+
+    // ── The fields, each carrying the name a person needs to see ─────
+    // A required field the body does not carry.
+    FormMissing(name: Str)
+    // A field that does not read as an integer.  The text is in the
+    // refusal because "age must be a whole number" is less useful than
+    // saying what arrived.
+    FormNotAnInt(name: Str, text: Str)
+    // A field that does not read as a float.
+    FormNotAFloat(name: Str, text: Str)
+    // A field that does not read as a boolean under the WEB's
+    // spellings — `on`, `true`, `yes`, `1` and their negatives.
+    FormNotABool(name: Str, text: Str)
+    // An integer outside its bounds.  Both bounds are in the refusal,
+    // because "must be between 1 and 100" is the sentence a person can
+    // act on.
+    FormOutOfRange(name: Str, text: Str, min: Int, max: Int)
+    // A string longer than the field allows, in BYTES — which is what a
+    // column width and a memory budget are measured in.
+    FormTooLong(name: Str, length: Int, limit: Int)
+    // A value outside the set the field offers.  The value is in the
+    // refusal so a log shows what was tried, because a client is not
+    // obliged to send an option the server offered.
+    FormNotAllowed(name: Str, text: Str)
+    // A required list with no values.
+    FormEmptyList(name: Str)
+
+// `FormError` is an `Error`, which is what lets
+// `Result<T, FormError>` exist at all (SPEC § 3.4) and what makes `!`
+// propagate one out of a caller with an error type of its own.
+impl Error for FormError
+    // The one-line message.
+    //
+    // For a field refusal the sentence NAMES THE FIELD and says what
+    // was expected, because it is going back to a person who has to fix
+    // it.  For a limit refusal it names the limit and the number, for a
+    // log.
+    fn message(self) -> Str
+        todo("form-nv.FormError.message")
+
+// The field a refusal is about, or the empty string for one that is
+// about the request.
+//
+// What a handler groups its 400's body by, and the reason every field
+// variant carries a name.
+pub fn error_field(e: FormError) -> Str []
+    todo("form-nv.formerr.error_field")
+
+// Whether a refusal is about a limit rather than about a field.
+//
+// The split a handler acts on, and the one `status_for` is built over.
+pub fn is_limit(e: FormError) -> Bool []
+    todo("form-nv.formerr.is_limit")
+
+// The HTTP status a refusal should produce: 413 for a limit, 415 for a
+// content type that is not multipart, 400 for everything else.
+//
+// PUBLISHED BECAUSE THE MAPPING IS A DECISION.  Two handlers making it
+// separately will disagree, and the wrong answer is a real failure: a
+// 500 for a bad form field tells a client to retry, and a client that
+// retries a malformed form retries forever.
+//
+// ```novo
+// use formerr
+//
+// fn main() [io]
+//     println("${formerr.status_for(FormMissing("name"))}")
+// ```
+pub fn status_for(e: FormError) -> Int []
+    todo("form-nv.formerr.status_for")
+
+// The byte offset in the body a parse refusal refers to, or -1.
+//
+// Only the parse variants have one.  A field refusal is about a value
+// the caller already holds, and inventing an offset for it would point
+// a reader at something they would then try to fix.
+pub fn error_at(e: FormError) -> Int []
+    todo("form-nv.formerr.error_at")
+
+// Every refusal's message, joined one per line.
+//
+// What a 400's body is, for a handler that has run `formfield.check`
+// and has a list.  A named call because "join the messages" is a line
+// every handler would otherwise write, and because the order — the
+// order the expectations were given, which is the order the form is
+// laid out in — is a decision rather than an accident.
+pub fn messages(es: [FormError]) -> Str []
+    todo("form-nv.formerr.messages")
+
+// Whether any refusal in a list is about a limit.
+//
+// A handler with one status to choose asks this: a list containing a
+// limit refusal is a 413 whatever else is in it, because the request
+// was never going to be processed.
+pub fn any_limit(es: [FormError]) -> Bool []
+    todo("form-nv.formerr.any_limit")

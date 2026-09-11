@@ -1,0 +1,265 @@
+// formfield.nv — a form field as the type a handler wanted, or a
+// refusal that names the field.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE ERROR NAMES THE FIELD, AND THAT IS THE WHOLE MODULE.  A handler
+// reading `age` out of a form gets `Str`, and the conversion to `Int`
+// is three lines it writes per field: is it there, does it parse, is it
+// in range.  Written by hand, the failure is `400 Bad Request` with no
+// body, because the handler has no name to put in one.  Every error
+// here carries the field's name, so the 400 says which field and what
+// was expected — which is the difference between a form a person can
+// correct and a form they abandon.
+//
+// AND IT ANSWERS EVERY BAD FIELD, NOT THE FIRST.  `check` takes a list
+// of expectations and answers every one that failed, because a form
+// with six bad fields should tell a person about six.  That is
+// schema-nv's and openapi-nv's rule, reached here for the same reason.
+//
+// WHAT "A LIST" MEANS IN A FORM, and it is the one place the two
+// encodings differ.  A repeated key is a list — `tag=a&tag=b` — and
+// there is no other spelling: a form has no nested structure, no
+// arrays-of-objects and no `field[0]`.  The bracket convention some
+// frameworks read (`tag[]=a`) is a convention rather than a standard,
+// it disagrees between frameworks about `a[b][c]`, and `bracket_names`
+// is published as a REPORT rather than implemented as a parse — so a
+// caller whose clients use it is told, and decides.
+
+use formurl
+use formerr
+
+// What a field was expected to be.
+//
+// A value rather than six functions because `check` takes a list of
+// them, and because a handler's expectations are usually a constant it
+// writes once beside its route.
+pub struct FormExpect
+    name: Str
+    kind: FormKind
+    // Whether the field must be present.  A missing optional field is
+    // not a failure; a missing required one is `FormMissing`.
+    required: Bool
+    // For an integer or a float: the inclusive bounds.  `min > max`
+    // means unbounded, which is the default from `expect_int`.
+    min: Int
+    max: Int
+    // For a string: the maximum byte length, or -1 for unbounded.
+    max_len: Int
+
+// What kind a field is read as.
+pub enum FormKind
+    FormKindStr
+    FormKindInt
+    FormKindBool
+    FormKindFloat
+    // A repeated key, read as every one of its values.
+    FormKindList
+
+// ── One field at a time ──────────────────────────────────────────────
+
+// A field as a string, or a refusal that names it.
+//
+// The difference from `formurl.get` is the refusal: this answers
+// `FormMissing(name)` rather than `None`, so a handler propagating with
+// `!` gets a message with the field in it for free.
+//
+// ```novo
+// use formfield
+// use formurl
+// use std.bytes
+//
+// fn main() [io]
+//     let b = formurl.parse(bytes.from_str("name=ada"))
+//     match formfield.get_str(b, "name")
+//         Ok(v)  => println(v)
+//         Err(_) => println("missing")
+// ```
+pub fn get_str(b: formurl.FormBody, name: Str) -> Result<Str, formerr.FormError> []
+    todo("form-nv.formfield.get_str")
+
+// A field as an integer.
+//
+// Decimal, with an optional sign, and nothing else: `0x10` is not an
+// integer in a form, because a browser has no way to send one and a
+// server that accepted one is accepting something it did not mean to.
+// A value that does not parse is `FormNotAnInt(name, text)`, and the
+// text is in the refusal because "age must be a whole number" is less
+// useful than saying what arrived.
+pub fn get_int(b: formurl.FormBody, name: Str) -> Result<Int, formerr.FormError> []
+    todo("form-nv.formfield.get_int")
+
+// A field as an integer within inclusive bounds.
+//
+// A separate refusal from a parse failure — `FormOutOfRange(name, …)`
+// carries both bounds — because "must be a number" and "must be between
+// 1 and 100" are two different sentences to the person filling the
+// form in.
+pub fn get_int_between(b: formurl.FormBody, name: Str, min: Int,
+                       max: Int) -> Result<Int, formerr.FormError> []
+    todo("form-nv.formfield.get_int_between")
+
+// A field as a boolean.
+//
+// THE SPELLINGS ARE THE WEB's, NOT THE LANGUAGE's, and the difference
+// matters: an HTML checkbox sends `on` when ticked and NOTHING AT ALL
+// when not, so a handler that read `false` from an absent field is
+// reading the right answer for the wrong reason, and one that required
+// `true`/`false` never sees a ticked checkbox at all.
+//
+// True: `on`, `true`, `yes`, `1`.  False: `off`, `false`, `no`, `0`,
+// and the empty string.  Case-insensitive.  Anything else is
+// `FormNotABool`.  An ABSENT field is `FormMissing` and not `false` —
+// `checkbox` below is the call that says absent means false, and it is
+// a separate name because a select with a yes/no option is a different
+// field and must not silently read as no.
+pub fn get_bool(b: formurl.FormBody, name: Str) -> Result<Bool, formerr.FormError> []
+    todo("form-nv.formfield.get_bool")
+
+// A checkbox: present and truthy is true, absent is false.
+//
+// The one call where absence has a meaning, named so that it cannot be
+// reached by accident.
+pub fn checkbox(b: formurl.FormBody, name: Str) -> Bool []
+    todo("form-nv.formfield.checkbox")
+
+// A field as a float.
+//
+// What `<input type="number" step="any">` sends: an optional sign,
+// digits, an optional fraction, an optional exponent.  `NaN` and
+// `Infinity` are `FormNotAFloat`, because no browser sends them and a
+// server that accepted one has taken a value that breaks every
+// comparison downstream.
+pub fn get_float(b: formurl.FormBody, name: Str) -> Result<Float, formerr.FormError> []
+    todo("form-nv.formfield.get_float")
+
+// Every value of a repeated key.
+//
+// The one shape a form has for a list.  An ABSENT key answers an empty
+// list rather than a refusal, because "no checkboxes ticked" is a valid
+// answer to a checkbox group and a required list is `get_list_required`.
+pub fn get_list(b: formurl.FormBody, name: Str) -> [Str] []
+    todo("form-nv.formfield.get_list")
+
+// Every value of a repeated key, refusing an empty one.
+pub fn get_list_required(b: formurl.FormBody, name: Str) -> Result<[Str], formerr.FormError> []
+    todo("form-nv.formfield.get_list_required")
+
+// Every value of a repeated key, as integers.
+//
+// One bad element refuses the whole list, and the refusal names the
+// field and the value — not the index, because a form's list has no
+// index a person can see.
+pub fn get_int_list(b: formurl.FormBody, name: Str) -> Result<[Int], formerr.FormError> []
+    todo("form-nv.formfield.get_int_list")
+
+// A field as a string, or a default when it is absent or empty.
+//
+// Absent AND empty, because a text input the user left alone sends an
+// empty value and a handler that wanted a default wanted it for both.
+pub fn get_or(b: formurl.FormBody, name: Str, fallback: Str) -> Str []
+    todo("form-nv.formfield.get_or")
+
+// A field as a string, refusing one longer than `max_len` bytes.
+//
+// Bytes and not characters, because that is what a database column and
+// a memory budget are measured in, and a caller that means characters
+// counts them itself.
+pub fn get_str_bounded(b: formurl.FormBody, name: Str,
+                       max_len: Int) -> Result<Str, formerr.FormError> []
+    todo("form-nv.formfield.get_str_bounded")
+
+// A field whose value must be one of a list.
+//
+// What a `<select>` sends, and the check a server has to run anyway
+// because a client is not obliged to send an option the server offered.
+// The refusal carries the value, so a log shows what was tried.
+pub fn get_one_of(b: formurl.FormBody, name: Str,
+                  allowed: [Str]) -> Result<Str, formerr.FormError> []
+    todo("form-nv.formfield.get_one_of")
+
+// ── A whole form at once ─────────────────────────────────────────────
+
+// A required string field.
+pub fn expect_str(name: Str) -> FormExpect []
+    todo("form-nv.formfield.expect_str")
+
+// A required integer field, unbounded.
+pub fn expect_int(name: Str) -> FormExpect []
+    todo("form-nv.formfield.expect_int")
+
+// A required integer field within inclusive bounds.
+pub fn expect_int_between(name: Str, min: Int, max: Int) -> FormExpect []
+    todo("form-nv.formfield.expect_int_between")
+
+// A required boolean field.
+pub fn expect_bool(name: Str) -> FormExpect []
+    todo("form-nv.formfield.expect_bool")
+
+// The same expectation, made optional.
+pub fn optional(e: FormExpect) -> FormExpect []
+    todo("form-nv.formfield.optional")
+
+// Every expectation a body fails.
+//
+// ANSWERS ALL OF THEM.  A form with six bad fields should tell a person
+// about six, and a handler that reported the first has a user who fixes
+// one field per round trip.
+//
+// An empty list means the body satisfies every expectation, which is
+// what a handler branches on before it reads a single value.
+//
+// ```novo
+// use formfield
+// use formurl
+// use std.bytes
+// use std.list
+//
+// fn main() [io]
+//     let b = formurl.parse(bytes.from_str("age=old"))
+//     let bad = formfield.check(b, [formfield.expect_int("age"),
+//                                   formfield.expect_str("name")])
+//     println("${list.len(bad)}")
+// ```
+pub fn check(b: formurl.FormBody, expects: [FormExpect]) -> [formerr.FormError] []
+    todo("form-nv.formfield.check")
+
+// Whether a body satisfies every expectation.
+pub fn is_valid(b: formurl.FormBody, expects: [FormExpect]) -> Bool []
+    todo("form-nv.formfield.is_valid")
+
+// The keys a body carries that no expectation names.
+//
+// Not a failure — a form may legitimately carry a CSRF token, a
+// honeypot field or a submit button's name — and worth answering,
+// because a handler that wants to refuse unexpected input needs the
+// list and a handler debugging a form wants to see what arrived.
+pub fn unexpected_keys(b: formurl.FormBody, expects: [FormExpect]) -> [Str] []
+    todo("form-nv.formfield.unexpected_keys")
+
+// ── The bracket convention, reported rather than implemented ─────────
+
+// The keys of a body that use the `name[]` or `name[key]` convention.
+//
+// A REPORT AND NOT A PARSE.  Some frameworks read `tag[]=a&tag[]=b` as
+// a list and `user[name]=ada` as a nested object; the convention is in
+// no standard, the frameworks disagree about `a[b][c]` and about
+// `a[]=1&a[2]=3`, and a library that picked one reading would give a
+// different answer from the client's own framework on exactly the
+// inputs where it matters.
+//
+// So this answers which keys look like that, and the caller decides:
+// strip the brackets, refuse the request, or read them with rules of
+// its own.  A body that uses none answers an empty list, which is the
+// case that costs nothing.
+pub fn bracket_names(b: formurl.FormBody) -> [Str] []
+    todo("form-nv.formfield.bracket_names")
+
+// A bracketed key's base name: `tag[]` is `tag`, `user[name]` is
+// `user`.
+//
+// Published beside `bracket_names` so that a caller that decided to
+// strip does not write the scan twice.  Says nothing about what the
+// brackets MEAN.
+pub fn bracket_base(key: Str) -> Str []
+    todo("form-nv.formfield.bracket_base")

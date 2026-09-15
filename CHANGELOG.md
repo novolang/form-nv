@@ -5,6 +5,10 @@ All notable changes to form-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.0.2 — 2026-09-15
+
+README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## 0.0.1 — 2026-09-11
 
 The **interface**: every signature and every effect row, and no bodies.
@@ -49,3 +53,21 @@ The **interface**: every signature and every effect row, and no bodies.
   this package writes nothing, and the README says so rather than
   leaving the absence to be noticed.
 - The scaffold's `src/form.nv` was dropped for five prefixed modules.
+
+### Design notes
+
+No signature in this package is effect-polymorphic, unlike its
+siblings, because the package writes nothing: the urlencoded serialiser
+answers a string or fills the caller's buffer, and the multipart half
+is a reader. A handler streaming a part to a sink passes its own
+`Write` implementation to its own function.
+
+The named first consumer is `compiler/stdlib/http_server.nv`, which has
+both halves by hand: `http_server_query_get` walks `&`-separated fields
+with `str.split` and answers only the first match, so a repeated key
+loses every value but one, and `http_server_url_decode` is a 25-line
+percent-decoder beside it. `formurl.get_all`, `formurl.decode` and
+`formscan.hex_value` replace them. The standard library has no
+multipart support at all.
+
+The scaffold's `src/form.nv` was dropped for five prefixed modules.

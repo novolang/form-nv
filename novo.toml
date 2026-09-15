@@ -1,6 +1,6 @@
 [package]
 name        = "form-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "HTML form bodies decoded from bytes: `application/x-www-form-urlencoded` to the WHATWG parser and serialiser, and `multipart/form-data` as a feed-and-drain parser that answers part headers and body chunks as RANGES into the caller's own buffer and never holds a part, with per-part and total limits that make it refuse rather than grow.  Typed field extraction whose errors name the field.  The urlencoded scanner is `@value` state and builds for a device.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 

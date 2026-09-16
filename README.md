@@ -303,8 +303,9 @@ every value in order, that a field with no `=` is a key with an empty
 value, that each limit refuses at the byte it is crossed, and that
 `check` answers every failed expectation.
 
-`tests/embedded_probe.nv` is the device claim as a program. It builds a
-Cortex-M4 executable against `formscan` alone.
+`tests/embedded_probe.nv` is the program that shows `formscan` builds
+for a microcontroller with no heap allocator. It builds a Cortex-M4
+executable against `formscan` alone.
 
 The tests compile today and fail at run, each on the
 `not implemented: form-nv.<module>.<fn>` panic that is its body. That is

@@ -1,15 +1,10 @@
-// formurl_tests.nv — the WHATWG rules, and the four places they differ
-// from urllib's.
+// formurl_tests.nv — the WHATWG `application/x-www-form-urlencoded`
+// parser and serialiser, and the scanner under them.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: form-nv.<module>.<fn>`.
-//
-// THE ASSERTION THIS SUITE EXISTS FOR: `a=1&a=2` is TWO values.  The
-// standard library's own `http_server_query_get` answers the first and
-// loses the second, which is a multi-select's whole content, and the
-// ordered pair list is what fixes it.
-//
-// THE VECTORS are the WHATWG's `urlencoded` web-platform tests.
+// The parser vectors are the web-platform-tests file
+// `url/urlencoded-parser.any.js`, less the ones whose answer holds
+// U+FFFD: the standard replaces an invalid UTF-8 sequence and this
+// package answers the bytes as sent.
 
 use std.test
 use std.list
@@ -22,27 +17,76 @@ use formerr
 fn parsed(src: Str) -> formurl.FormBody
     formurl.parse(bytes.from_str(src))
 
+// Every pair of a body as `name=value`, decoded, joined with `|`.
+fn pairs_of(src: Str) -> Str
+    let b = parsed(src)
+    var out: [Str] = []
+    for p in b.pairs
+        list.push(out, formurl.key_str(b, p) + "=" + formurl.value_str(b, p))
+    str.join(out, "|")
+
 @test
-fn test_a_repeated_key_is_a_list_and_not_a_choice() [io]
+fn test_the_web_platform_tests_parser_vectors() [io]
+    test.case("an empty body, and separators alone, have no pairs")
+    test.assert(pairs_of("") == "")
+    test.assert(pairs_of("&") == "")
+
+    test.case("a name with no `=` has an empty value")
+    test.assert(pairs_of("test") == "test=")
+    test.assert(pairs_of("a") == "a=")
+    test.assert(pairs_of("a=") == "a=")
+    test.assert(pairs_of("=b") == "=b")
+    test.assert(pairs_of("a=b") == "a=b")
+
+    test.case("empty fields are skipped")
+    test.assert(pairs_of("&a") == "a=")
+    test.assert(pairs_of("a&") == "a=")
+    test.assert(pairs_of("a&a") == "a=|a=")
+    test.assert(pairs_of("a&b&c") == "a=|b=|c=")
+    test.assert(pairs_of("a=b&c=d") == "a=b|c=d")
+    test.assert(pairs_of("a=b&c=d&") == "a=b|c=d")
+    test.assert(pairs_of("&&&a=b&&&&c=d&") == "a=b|c=d")
+    test.assert(pairs_of("a=a&a=b&a=c") == "a=a|a=b|a=c")
+
+    test.case("only the first `=` separates")
+    test.assert(pairs_of("a==a") == "a==a")
+
+    test.case("`+` is a space and `%XX` is a byte, in either case")
+    test.assert(pairs_of("a=a+b+c+d") == "a=a b c d")
+    test.assert(pairs_of("%61=a") == "a=a")
+    test.assert(pairs_of("%61+%4d%4D=") == "a MM=")
+
+    test.case("a `%` that begins no escape is kept")
+    test.assert(pairs_of("%=a") == "%=a")
+    test.assert(pairs_of("%a=a") == "%a=a")
+    test.assert(pairs_of("%a_=a") == "%a_=a")
+    test.assert(pairs_of("id=0&value=%") == "id=0|value=%")
+    test.assert(pairs_of("b=%2sf%2a") == "b=%2sf*")
+    test.assert(pairs_of("b=%2%2af%2a") == "b=%2*f*")
+    test.assert(pairs_of("b=%%2a") == "b=%*")
+
+    test.case("UTF-8 passes through, escaped or not")
+    test.assert(pairs_of("%EF%BB%BFtest=%EF%BB%BF") == "\u{FEFF}test=\u{FEFF}")
+    test.assert(pairs_of("\u{FEFF}test=\u{FEFF}") == "\u{FEFF}test=\u{FEFF}")
+    test.assert(pairs_of("%EF%BF%BF=%EF%BF%BF") == "\u{FFFF}=\u{FFFF}")
+    test.assert(pairs_of("†&†=x") == "†=|†=x")
+
+@test
+fn test_a_repeated_name_is_a_list() [io]
     let b = parsed("tag=a&tag=b&name=ada")
 
-    test.case("THE CLAIM: three fields, two of them the same key")
+    test.case("three fields, two of them one name")
     test.assert(list.len(b.pairs) == 3)
 
-    test.case("get answers the FIRST, which is what a form's own reader sees")
+    test.case("get answers the first and get_all answers both, in order")
     test.assert(formurl.get(b, "tag") == Some("a"))
-
-    test.case("and get_all answers both, in the body's own order")
     let all = formurl.get_all(b, "tag")
     test.assert(list.len(all) == 2)
-    test.assert(all[0] == "a")
     test.assert(all[1] == "b")
 
-    test.case("count says how many without building the list")
+    test.case("count and keys")
     test.assert(formurl.count(b, "tag") == 2)
     test.assert(formurl.count(b, "absent") == 0)
-
-    test.case("keys answers each key once, in the order first seen")
     let ks = formurl.keys(b)
     test.assert(list.len(ks) == 2)
     test.assert(ks[0] == "tag")
@@ -50,104 +94,88 @@ fn test_a_repeated_key_is_a_list_and_not_a_choice() [io]
 
 @test
 fn test_a_field_with_no_value_is_present_and_empty() [io]
-    // THE DIFFERENCE THAT MATTERS between the WHATWG parser and
-    // urllib's: a browser sends an empty value for a text input the
-    // user left alone, and dropping it makes "the user cleared this"
-    // indistinguishable from "the field was not on the form".
     let b = parsed("name=&tick&other=x")
 
-    test.case("an empty value is a value")
+    test.case("an empty value and a bare name both answer the empty string")
     test.assert(formurl.get(b, "name") == Some(""))
-    test.assert(formurl.has(b, "name"))
-
-    test.case("a bare key is a key with an empty value")
     test.assert(formurl.get(b, "tick") == Some(""))
     test.assert(formurl.has(b, "tick"))
 
-    test.case("and the parse says which of the two it was")
+    test.case("the pair says which of the two it was")
     test.assert(b.pairs[0].had_assigner)
     test.assert(not b.pairs[1].had_assigner)
 
-    test.case("an absent key is absent, which is a different answer")
+    test.case("an absent name is absent")
     test.assert(not formurl.has(b, "nothing"))
     test.assert(formurl.get(b, "nothing") == None)
 
-    test.case("an entirely empty field is skipped")
-    test.assert(list.len(parsed("a=1&&b=2").pairs) == 2)
-
 @test
-fn test_the_parse_cannot_fail_because_the_standard_has_no_error_case() [io]
-    test.case("an empty body is an empty list")
-    test.assert(list.len(parsed("").pairs) == 0)
-
-    test.case("a `%` that begins no escape is a literal `%`, as the standard says")
-    let b = parsed("a=100%&b=%zz")
-    test.assert(formurl.get(b, "a") == Some("100%"))
-    test.assert(b.had_bad_escape)
-
-    test.case("and a caller stricter than the standard has the flag")
+fn test_a_bound_on_the_field_count() [io]
+    test.case("a bad escape is flagged, and a clean body is not")
+    test.assert(parsed("a=100%&b=%zz").had_bad_escape)
     test.assert(not parsed("a=100").had_bad_escape)
 
-    test.case("a body with more fields than a server takes IS refused, by the bounded call")
+    test.case("more fields than the bound are refused")
     match formurl.parse_bounded(bytes.from_str("a=1&b=2&c=3"), 2)
         Ok(_)  => test.assert(false)
-        Err(e) => test.assert(formerr.is_limit(e))
+        Err(e) =>
+            test.assert(formerr.is_limit(e))
+            match e
+                FormTooManyPairs(n) => test.assert(n == 2)
+                _                   => test.assert(false)
 
-    test.case("and accepted under a bound that admits it")
+    test.case("and a body within it is read")
     match formurl.parse_bounded(bytes.from_str("a=1&b=2"), 2)
         Err(_) => test.assert(false)
         Ok(x)  => test.assert(list.len(x.pairs) == 2)
 
 @test
-fn test_decoding_is_the_form_rules_and_not_a_general_uri_decode() [io]
-    test.case("`+` is a space")
-    test.assert(formurl.get(parsed("name=ada+lovelace"), "name") == Some("ada lovelace"))
-
-    test.case("and so is `%20`")
-    test.assert(formurl.get(parsed("name=ada%20lovelace"), "name") == Some("ada lovelace"))
-
-    test.case("`%2F` is a slash, in either case")
+fn test_decoding_is_one_call() [io]
+    test.case("`+`, `%20` and `%2F` in either case")
+    test.assert(formurl.decode("ada+lovelace") == "ada lovelace")
+    test.assert(formurl.decode("ada%20lovelace") == "ada lovelace")
     test.assert(formurl.decode("a%2Fb") == "a/b")
     test.assert(formurl.decode("a%2fb") == "a/b")
 
-    test.case("the key is decoded too, not only the value")
-    test.assert(formurl.has(parsed("a+b=1"), "a b"))
+    test.case("`&` and `=` are ordinary bytes to decode")
+    test.assert(formurl.decode("a=b&c") == "a=b&c")
+
+    test.case("a truncated escape is kept")
+    test.assert(formurl.decode("50%") == "50%")
+    test.assert(formurl.decode("50%4") == "50%4")
 
 @test
-fn test_a_pair_is_a_pair_of_spans_and_nothing_is_copied_until_asked() [io]
-    let b = parsed("name=ada&city=london")
+fn test_a_pair_is_spans_and_is_decoded_on_request() [io]
+    let b = parsed("name=ada&city=london&z=%00x")
 
-    test.case("four integers per pair")
-    test.assert(b.pairs[0].key.start < b.pairs[0].key.end)
-    test.assert(b.pairs[0].value.start < b.pairs[0].value.end)
+    test.case("the spans index the body")
+    test.assert(b.pairs[0].key.start == 0)
+    test.assert(b.pairs[0].key.end == 4)
+    test.assert(b.pairs[0].value.start == 5)
+    test.assert(b.pairs[0].value.end == 8)
 
-    test.case("and the decode is a call")
+    test.case("the decode is a call")
     test.assert(formurl.key_str(b, b.pairs[0]) == "name")
     test.assert(formurl.value_str(b, b.pairs[0]) == "ada")
 
-    test.case("a value can be read as bytes, because a form field is not always text")
+    test.case("a value's bytes hold what a `Str` cannot")
     test.assert(bytes.to_str(formurl.value_bytes(b, b.pairs[1])) == "london")
+    test.assert(bytes.to_hex(formurl.value_bytes(b, b.pairs[2])) == "0078")
 
-    test.case("a span reads back as bytes without a decode")
+    test.case("a span's encoded bytes, and its decoded length without a decode")
     test.assert(bytes.len(formurl.span_bytes(b, b.pairs[0].key)) == 4)
-
-    test.case("the decoded length is answered without decoding, so a size check is free")
     test.assert(formurl.decoded_len(b, b.pairs[0].value) == 3)
-    let plus = parsed("a=x%2Fy")
-    test.assert(formurl.decoded_len(plus, plus.pairs[0].value) == 3)
+    let esc = parsed("a=x%2Fy%")
+    test.assert(formurl.decoded_len(esc, esc.pairs[0].value) == 4)
 
 @test
-fn test_the_serialiser_is_the_whatwg_one_and_that_is_checkable() [io]
-    test.case("a space becomes `+`")
+fn test_the_serialiser_is_the_whatwg_one() [io]
+    test.case("a space becomes `+`, `&` an escape, and hex is upper case")
     test.assert(formurl.serialise([("q", "a b")]) == "q=a+b")
-
-    test.case("and an ampersand becomes an escape")
     test.assert(formurl.serialise([("n", "1&2")]) == "n=1%262")
-
-    test.case("HEX IS UPPER CASE — lower case round-trips the same and compares unequal")
     test.assert(formurl.encode("a/b") == "a%2Fb")
 
-    test.case("AND `~` IS ENCODED, which is where urllib's safe set differs")
+    test.case("`~` is encoded, where urllib leaves it")
     test.assert(formurl.encode("~") == "%7E")
     test.assert(not formurl.is_safe("~"))
 
@@ -155,123 +183,159 @@ fn test_the_serialiser_is_the_whatwg_one_and_that_is_checkable() [io]
     test.assert(formurl.is_safe("aZ0*-._"))
     test.assert(formurl.encode("aZ0*-._") == "aZ0*-._")
 
+    test.case("no pairs is the empty string")
+    test.assert(formurl.serialise([]) == "")
+    test.assert(formurl.serialised_len([]) == 0)
+
 @test
 fn test_serialise_round_trips_through_parse() [io]
     let pairs = [("q", "a b"), ("n", "1&2"), ("empty", ""), ("uni", "café")]
     let text = formurl.serialise(pairs)
     let b = formurl.parse_str(text)
 
-    test.case("every pair survived")
+    test.case("every pair survives")
+    test.assert(text == "q=a+b&n=1%262&empty=&uni=caf%C3%A9")
     test.assert(list.len(b.pairs) == 4)
-    test.assert(formurl.get(b, "q") == Some("a b"))
     test.assert(formurl.get(b, "n") == Some("1&2"))
-    test.assert(formurl.get(b, "empty") == Some(""))
     test.assert(formurl.get(b, "uni") == Some("café"))
 
-    test.case("and the length was answered before the string was built")
+    test.case("the length is known before the write")
     test.assert(formurl.serialised_len(pairs) == str.len(text))
 
-    test.case("into a caller's buffer is the same bytes")
-    let buf = bytes.zeros(formurl.serialised_len(pairs) + 4)
-    test.assert(bytes.len(formurl.serialise_into(buf, 0, pairs)) >= str.len(text))
+    test.case("the buffer form writes the same bytes at an offset")
+    var buf = bytes.zeros(formurl.serialised_len(pairs) + 2)
+    formurl.serialise_into(buf, 1, pairs)
+    test.assert(bytes.to_str(bytes.slice(buf, 1, 1 + str.len(text))) == text)
+    test.assert(bytes.byte_at(buf, 0) == Some(0))
 
 @test
 fn test_the_host_half_and_the_device_half_are_one_walk() [io]
-    let b = bytes.from_str("a=1&b=2")
+    let body = bytes.from_str("a=1&b=2")
 
-    test.case("the scanner's answer agrees with the parse")
-    let s = formurl.scan_all(b)
-    test.assert(formscan.scan_fields(s) == 2)
-    test.assert(list.len(formurl.parse(b).pairs) == 2)
+    test.case("the scan agrees with the parse")
+    test.assert(formscan.scan_fields(formurl.scan_all(body)) == 2)
+    test.assert(list.len(formurl.parse(body).pairs) == 2)
 
-    test.case("and the scanner is the same one a device drives a byte at a time")
+    test.case("a device drives the same scanner a byte at a time")
     var d = formscan.scan()
-    d = formscan.scan_byte(d, 97)
-    d = formscan.scan_byte(d, 61)
-    d = formscan.scan_byte(d, 49)
-    d = formscan.scan_byte(d, 38)
-    d = formscan.scan_byte(d, 98)
-    d = formscan.scan_byte(d, 61)
-    d = formscan.scan_byte(d, 50)
+    for c in [97, 61, 49, 38, 98, 61, 50]
+        d = formscan.scan_byte(d, c)
     d = formscan.scan_end(d)
     test.assert(formscan.scan_fields(d) == 2)
+    test.assert(formscan.scan_field_done(d))
+
+    test.case("an empty field closes without counting")
+    var e = formscan.scan_byte(formscan.scan(), '&')
+    test.assert(not formscan.scan_field_done(e))
+    test.assert(formscan.scan_field_start(e) == 1)
+    e = formscan.scan_end(e)
+    test.assert(formscan.scan_fields(e) == 0)
 
 @test
 fn test_the_scanner_decodes_as_it_walks() [io]
     test.case("`+` answers a space on the step that fed it")
-    let p = formscan.scan_byte(formscan.scan(), 43)
+    let p = formscan.scan_byte(formscan.scan(), '+')
     test.assert(formscan.scan_emitted(p))
     test.assert(formscan.scan_out(p) == 32)
+    test.assert(formscan.scan_out_count(p) == 1)
 
     test.case("an escape answers its byte on the step that fed the last digit")
-    var e = formscan.scan()
-    e = formscan.scan_byte(e, 37)
+    var e = formscan.scan_byte(formscan.scan(), '%')
     test.assert(formscan.scan_in_escape(e))
     test.assert(not formscan.scan_emitted(e))
-    e = formscan.scan_byte(e, 50)
+    test.assert(formscan.scan_out(e) == -1)
+    e = formscan.scan_byte(e, '2')
     test.assert(formscan.scan_in_escape(e))
-    e = formscan.scan_byte(e, 70)
-    test.assert(formscan.scan_emitted(e))
+    e = formscan.scan_byte(e, 'F')
     test.assert(formscan.scan_out(e) == 47)
     test.assert(not formscan.scan_in_escape(e))
 
-    test.case("THE ONE REFUSAL A `@value` STATE CAN CARRY is a flag")
-    var bad = formscan.scan()
-    bad = formscan.scan_byte(bad, 37)
-    bad = formscan.scan_byte(bad, 122)
+    test.case("a `%` that begins no escape comes out with the byte that showed it")
+    var bad = formscan.scan_byte(formscan.scan(), '%')
+    bad = formscan.scan_byte(bad, 'z')
     test.assert(formscan.scan_bad_escape(bad))
+    test.assert(formscan.scan_out_count(bad) == 2)
+    test.assert(formscan.scan_out_at(bad, 0) == '%')
+    test.assert(formscan.scan_out_at(bad, 1) == 'z')
+    test.assert(formscan.scan_out_at(bad, 2) == -1)
+    test.assert(formscan.scan_out_at(bad, -1) == -1)
 
-    test.case("and a truncated escape at the end of a body is the same flag")
-    var cut = formscan.scan()
-    cut = formscan.scan_byte(cut, 37)
+    test.case("after one digit, three bytes come out")
+    var two = formscan.scan_byte(formscan.scan(), '%')
+    two = formscan.scan_byte(two, '4')
+    two = formscan.scan_byte(two, 'g')
+    test.assert(formscan.scan_out_count(two) == 3)
+    test.assert(formscan.scan_out_at(two, 1) == '4')
+    test.assert(formscan.scan_out_at(two, 2) == 'g')
+
+    test.case("a `%` before `=` belongs to the name, and before `&` to its field")
+    var k = formscan.scan_byte(formscan.scan(), '%')
+    k = formscan.scan_byte(k, '=')
+    test.assert(formscan.scan_key_done(k))
+    test.assert(formscan.scan_in_key(k))
+    test.assert(formscan.scan_out(k) == '%')
+    var f = formscan.scan_byte(formscan.scan(), '%')
+    f = formscan.scan_byte(f, '&')
+    test.assert(formscan.scan_field_done(f))
+    test.assert(formscan.scan_out(f) == '%')
+
+    test.case("a truncated escape at the end is flagged and kept")
+    var cut = formscan.scan_byte(formscan.scan(), '%')
     cut = formscan.scan_end(cut)
     test.assert(formscan.scan_bad_escape(cut))
+    test.assert(formscan.scan_out(cut) == '%')
+    var cut2 = formscan.scan_byte(formscan.scan(), '%')
+    cut2 = formscan.scan_byte(cut2, 'a')
+    cut2 = formscan.scan_end(cut2)
+    test.assert(formscan.scan_out_count(cut2) == 2)
+    test.assert(formscan.scan_fields(cut2) == 1)
 
 @test
 fn test_the_scanner_says_which_side_of_the_equals_a_byte_is_on() [io]
-    var s = formscan.scan()
-    s = formscan.scan_byte(s, 97)
+    var s = formscan.scan_byte(formscan.scan(), 'a')
 
-    test.case("before the `=`, the byte is in the key")
+    test.case("before the `=`, the byte is in the name")
     test.assert(formscan.scan_in_key(s))
     test.assert(not formscan.scan_has_value(s))
 
-    s = formscan.scan_byte(s, 61)
-    test.case("the `=` closes it")
+    s = formscan.scan_byte(s, '=')
+    test.case("the `=` ends it")
     test.assert(formscan.scan_key_done(s))
     test.assert(formscan.scan_has_value(s))
 
-    s = formscan.scan_byte(s, 49)
-    test.case("and after it, the byte is in the value")
+    s = formscan.scan_byte(s, '=')
+    test.case("a second `=` is a value byte")
+    test.assert(not formscan.scan_key_done(s))
+    test.assert(formscan.scan_out(s) == '=')
     test.assert(not formscan.scan_in_key(s))
 
-    s = formscan.scan_byte(s, 38)
+    s = formscan.scan_byte(s, '&')
     test.case("the `&` closes the field")
     test.assert(formscan.scan_field_done(s))
     test.assert(formscan.scan_fields(s) == 1)
     test.assert(formscan.scan_field_start(s) == formscan.scan_pos(s))
+    test.assert(formscan.scan_pos(s) == 4)
 
 @test
-fn test_the_byte_arithmetic_is_published_because_two_copies_would_disagree() [io]
-    test.case("the three separators, as integers")
-    test.assert(formscan.separator() == 38)
-    test.assert(formscan.assigner() == 61)
-    test.assert(formscan.plus_means() == 32)
+fn test_the_byte_arithmetic() [io]
+    test.case("the separators")
+    test.assert(formscan.separator() == '&')
+    test.assert(formscan.assigner() == '=')
+    test.assert(formscan.plus_means() == ' ')
 
-    test.case("hex both ways, both cases in and upper case out")
-    test.assert(formscan.hex_value(48) == 0)
-    test.assert(formscan.hex_value(70) == 15)
-    test.assert(formscan.hex_value(102) == 15)
-    test.assert(formscan.hex_value(103) == -1)
-    test.assert(formscan.hex_digit(15) == 70)
+    test.case("hex both ways")
+    test.assert(formscan.hex_value('0') == 0)
+    test.assert(formscan.hex_value('F') == 15)
+    test.assert(formscan.hex_value('f') == 15)
+    test.assert(formscan.hex_value('g') == -1)
+    test.assert(formscan.hex_digit(9) == '9')
+    test.assert(formscan.hex_digit(15) == 'F')
 
-    test.case("the safe set, byte by byte")
-    test.assert(formscan.byte_safe(97))
-    test.assert(formscan.byte_safe(42))
-    test.assert(not formscan.byte_safe(126))
-    test.assert(not formscan.byte_safe(38))
-
-    test.case("and the encoded width a device adds up before it writes")
-    test.assert(formscan.encoded_len(97) == 1)
-    test.assert(formscan.encoded_len(32) == 1)
-    test.assert(formscan.encoded_len(38) == 3)
+    test.case("the safe set and the width a byte encodes to")
+    test.assert(formscan.byte_safe('a'))
+    test.assert(formscan.byte_safe('*'))
+    test.assert(not formscan.byte_safe('~'))
+    test.assert(not formscan.byte_safe('&'))
+    test.assert(formscan.encoded_len('a') == 1)
+    test.assert(formscan.encoded_len(' ') == 1)
+    test.assert(formscan.encoded_len('&') == 3)

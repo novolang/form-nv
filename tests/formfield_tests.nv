@@ -1,13 +1,5 @@
-// formfield_tests.nv — the refusal that names the field, and the
-// boolean whose spellings are the web's.
-//
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: form-nv.<module>.<fn>`.
-//
-// THE ASSERTION THIS SUITE EXISTS FOR: `check` answers SIX findings for
-// a form with six bad fields. A handler that reported the first has a
-// user who fixes one field per round trip, and the whole reason every
-// refusal carries a name is so the 400 can say which.
+// formfield_tests.nv — typed reads whose refusals name the field, and
+// the boolean spellings a web form sends.
 
 use std.test
 use std.list
@@ -20,6 +12,27 @@ use formerr
 fn parsed(src: Str) -> formurl.FormBody
     formurl.parse(bytes.from_str(src))
 
+// A read's answer as text: the value, or `err` and the field it names.
+fn int_of(r: Result<Int, formerr.FormError>) -> Str
+    match r
+        Ok(n)  => "${n}"
+        Err(e) => "err " + formerr.error_field(e)
+
+fn bool_of(r: Result<Bool, formerr.FormError>) -> Str
+    match r
+        Ok(v)  => "${v}"
+        Err(e) => "err " + formerr.error_field(e)
+
+fn float_of(r: Result<Float, formerr.FormError>) -> Str
+    match r
+        Ok(v)  => "${v}"
+        Err(e) => "err " + formerr.error_field(e)
+
+fn str_of(r: Result<Str, formerr.FormError>) -> Str
+    match r
+        Ok(v)  => v
+        Err(e) => "err " + formerr.error_field(e)
+
 @test
 fn test_every_refusal_names_the_field() [io]
     let b = parsed("age=old&name=ada")
@@ -29,8 +42,8 @@ fn test_every_refusal_names_the_field() [io]
         Ok(_)  => test.assert(false)
         Err(e) =>
             test.assert(formerr.error_field(e) == "age")
-            test.assert(str.contains(e.message(), "age"))
-            test.assert(str.contains(e.message(), "old"))
+            test.assert(str.contains(formerr.messages([e]), "age"))
+            test.assert(str.contains(formerr.messages([e]), "old"))
 
     test.case("a missing field names itself too")
     match formfield.get_str(b, "city")
@@ -49,10 +62,10 @@ fn test_an_integer_is_decimal_and_nothing_else() [io]
     let b = parsed("a=42&b=-7&c=0x10&d=+3&e=&f=4.5")
 
     test.case("decimal, with an optional sign")
-    test.assert(formfield.get_int(b, "a") == Ok(42))
-    test.assert(formfield.get_int(b, "b") == Ok(-7))
+    test.assert(int_of(formfield.get_int(b, "a")) == "42")
+    test.assert(int_of(formfield.get_int(b, "b")) == "-7")
 
-    test.case("HEXADECIMAL IS NOT AN INTEGER IN A FORM — no browser sends one")
+    test.case("hexadecimal is not an integer: no browser sends one")
     match formfield.get_int(b, "c")
         Ok(_)  => test.assert(false)
         Err(_) => test.assert(true)
@@ -74,45 +87,45 @@ fn test_out_of_range_is_a_different_sentence_from_not_a_number() [io]
         Ok(_)  => test.assert(false)
         Err(e) =>
             test.assert(formerr.error_field(e) == "age")
-            test.assert(str.contains(e.message(), "120"))
+            test.assert(str.contains(formerr.messages([e]), "120"))
 
     test.case("and a number inside them comes back")
-    test.assert(formfield.get_int_between(b, "age", 1, 1000) == Ok(200))
+    test.assert(int_of(formfield.get_int_between(b, "age", 1, 1000)) == "200")
 
     test.case("a value that is not a number at all is the OTHER refusal")
     match formfield.get_int_between(b, "other", 1, 120)
         Ok(_)  => test.assert(false)
-        Err(e) => test.assert(str.contains(e.message(), "old"))
+        Err(e) => test.assert(str.contains(formerr.messages([e]), "old"))
 
 @test
 fn test_a_booleans_spellings_are_the_webs() [io]
     let b = parsed("a=on&c=true&d=yes&e=1&f=off&g=false&h=no&i=0&j=&k=maybe")
 
     test.case("what a ticked checkbox actually sends")
-    test.assert(formfield.get_bool(b, "a") == Ok(true))
+    test.assert(bool_of(formfield.get_bool(b, "a")) == "true")
 
     test.case("and the three other truthy spellings")
-    test.assert(formfield.get_bool(b, "c") == Ok(true))
-    test.assert(formfield.get_bool(b, "d") == Ok(true))
-    test.assert(formfield.get_bool(b, "e") == Ok(true))
+    test.assert(bool_of(formfield.get_bool(b, "c")) == "true")
+    test.assert(bool_of(formfield.get_bool(b, "d")) == "true")
+    test.assert(bool_of(formfield.get_bool(b, "e")) == "true")
 
     test.case("the falsy ones, including the empty value")
-    test.assert(formfield.get_bool(b, "f") == Ok(false))
-    test.assert(formfield.get_bool(b, "g") == Ok(false))
-    test.assert(formfield.get_bool(b, "h") == Ok(false))
-    test.assert(formfield.get_bool(b, "i") == Ok(false))
-    test.assert(formfield.get_bool(b, "j") == Ok(false))
+    test.assert(bool_of(formfield.get_bool(b, "f")) == "false")
+    test.assert(bool_of(formfield.get_bool(b, "g")) == "false")
+    test.assert(bool_of(formfield.get_bool(b, "h")) == "false")
+    test.assert(bool_of(formfield.get_bool(b, "i")) == "false")
+    test.assert(bool_of(formfield.get_bool(b, "j")) == "false")
 
     test.case("anything else is a refusal that quotes what arrived")
     match formfield.get_bool(b, "k")
         Ok(_)  => test.assert(false)
-        Err(e) => test.assert(str.contains(e.message(), "maybe"))
+        Err(e) => test.assert(str.contains(formerr.messages([e]), "maybe"))
 
 @test
 fn test_absence_means_false_only_in_the_call_named_checkbox() [io]
     let b = parsed("ticked=on")
 
-    test.case("AN ABSENT FIELD IS MISSING, not false — a yes/no select is not a no")
+    test.case("an absent field is missing, not false")
     match formfield.get_bool(b, "unticked")
         Ok(_)  => test.assert(false)
         Err(e) => test.assert(formerr.error_field(e) == "unticked")
@@ -130,7 +143,7 @@ fn test_a_repeated_key_is_the_only_list_a_form_has() [io]
     test.assert(list.len(tags) == 3)
     test.assert(tags[2] == "c")
 
-    test.case("AN ABSENT KEY IS AN EMPTY LIST — no checkboxes ticked is an answer")
+    test.case("an absent name is an empty list")
     test.assert(list.len(formfield.get_list(b, "absent")) == 0)
 
     test.case("and a required list says so")
@@ -141,17 +154,17 @@ fn test_a_repeated_key_is_the_only_list_a_form_has() [io]
     test.case("one bad element refuses the whole list, naming the value")
     match formfield.get_int_list(b, "n")
         Ok(_)  => test.assert(false)
-        Err(e) => test.assert(str.contains(e.message(), "x"))
+        Err(e) => test.assert(str.contains(formerr.messages([e]), "x"))
 
 @test
 fn test_a_float_is_what_a_number_input_sends() [io]
     let b = parsed("a=1.5&b=-2e3&c=NaN&d=Infinity")
 
     test.case("a decimal and an exponent")
-    test.assert(formfield.get_float(b, "a") == Ok(1.5))
-    test.assert(formfield.get_float(b, "b") == Ok(-2000.0))
+    test.assert(float_of(formfield.get_float(b, "a")) == "1.5")
+    test.assert(float_of(formfield.get_float(b, "b")) == "-2000")
 
-    test.case("NaN AND Infinity ARE REFUSED — no browser sends them")
+    test.case("NaN and Infinity are refused")
     match formfield.get_float(b, "c")
         Ok(_)  => test.assert(false)
         Err(_) => test.assert(true)
@@ -173,22 +186,22 @@ fn test_the_bounded_and_defaulted_reads() [io]
         Ok(_)  => test.assert(false)
         Err(e) =>
             test.assert(formerr.error_field(e) == "long")
-            test.assert(str.contains(e.message(), "4"))
+            test.assert(str.contains(formerr.messages([e]), "4"))
 
     test.case("and a value inside it comes back")
-    test.assert(formfield.get_str_bounded(b, "name", 8) == Ok("ada"))
+    test.assert(str_of(formfield.get_str_bounded(b, "name", 8)) == "ada")
 
 @test
 fn test_a_select_is_checked_against_what_the_server_offered() [io]
     let b = parsed("colour=green&other=purple")
 
     test.case("an offered option comes back")
-    test.assert(formfield.get_one_of(b, "colour", ["red", "green", "blue"]) == Ok("green"))
+    test.assert(str_of(formfield.get_one_of(b, "colour", ["red", "green", "blue"])) == "green")
 
-    test.case("A CLIENT NEED NOT SEND ONE, and the refusal quotes what was tried")
+    test.case("anything else is refused, quoting what was tried")
     match formfield.get_one_of(b, "other", ["red", "green", "blue"])
         Ok(_)  => test.assert(false)
-        Err(e) => test.assert(str.contains(e.message(), "purple"))
+        Err(e) => test.assert(str.contains(formerr.messages([e]), "purple"))
 
 @test
 fn test_check_answers_every_bad_field_and_not_the_first() [io]
@@ -200,7 +213,7 @@ fn test_check_answers_every_bad_field_and_not_the_first() [io]
                    formfield.expect_int_between("size", 1, 10),
                    formfield.expect_str("city")]
 
-    test.case("THE CLAIM: six expectations, six findings")
+    test.case("six expectations, six findings")
     let bad = formfield.check(b, expects)
     test.assert(list.len(bad) == 6)
 
@@ -240,7 +253,7 @@ fn test_unexpected_keys_are_reported_and_not_refused() [io]
 fn test_the_bracket_convention_is_reported_rather_than_parsed() [io]
     let b = parsed("tag[]=a&tag[]=b&user[name]=ada&plain=x")
 
-    test.case("A REPORT AND NOT A PARSE — no standard, and frameworks disagree")
+    test.case("the bracketed names are reported")
     let names = formfield.bracket_names(b)
     test.assert(list.len(names) == 2)
 
@@ -273,3 +286,61 @@ fn test_the_expectations_are_values_a_handler_writes_beside_its_route() [io]
 
     test.case("and an unbounded one says so by having none that hold")
     test.assert(formfield.expect_int("a").min > formfield.expect_int("a").max)
+
+@test
+fn test_the_number_grammars() [io]
+    let b = parsed("p=%2B3&big=99999999999999999999&h=.5&t=1.&e=1e%2B5&n=1e&dot=.&s=-")
+
+    test.case("a leading plus sign is read")
+    test.assert(int_of(formfield.get_int(b, "p")) == "3")
+
+    test.case("an integer too large for an Int is refused")
+    test.assert(int_of(formfield.get_int(b, "big")) == "err big")
+    test.assert(int_of(formfield.get_int(b, "s")) == "err s")
+
+    test.case("a number may start or end with its point, and its exponent may be signed")
+    test.assert(float_of(formfield.get_float(b, "h")) == "0.5")
+    test.assert(float_of(formfield.get_float(b, "t")) == "1")
+    test.assert(float_of(formfield.get_float(b, "e")) == "100000")
+
+    test.case("an exponent with no digits, and a point alone, are refused")
+    test.assert(float_of(formfield.get_float(b, "n")) == "err n")
+    test.assert(float_of(formfield.get_float(b, "dot")) == "err dot")
+
+@test
+fn test_lists_that_succeed() [io]
+    let b = parsed("n=1&n=2&t=a")
+
+    test.case("a required list with values, and a list of integers")
+    match formfield.get_list_required(b, "t")
+        Ok(vs) => test.assert(list.len(vs) == 1)
+        Err(_) => test.assert(false)
+    match formfield.get_int_list(b, "n")
+        Ok(ns) => test.assert(ns[1] == 2)
+        Err(_) => test.assert(false)
+
+@test
+fn test_check_reads_every_kind() [io]
+    let b = parsed("s=abcdef&i=5&t=on&f=1.5&g=x&l=1")
+    let short = FormExpect { name: "s", kind: FormKindStr, required: true, min: 1, max: 0, max_len: 3 }
+    let wide = FormExpect { name: "s", kind: FormKindStr, required: true, min: 1, max: 0, max_len: 10 }
+    let num = FormExpect { name: "f", kind: FormKindFloat, required: true, min: 1, max: 0, max_len: 0 - 1 }
+    let bad = FormExpect { name: "g", kind: FormKindFloat, required: true, min: 1, max: 0, max_len: 0 - 1 }
+    let lst = FormExpect { name: "l", kind: FormKindList, required: true, min: 1, max: 0, max_len: 0 - 1 }
+
+    test.case("a string over its length, and a number that is not one, are findings")
+    let found = formfield.check(b, [short, num, bad])
+    test.assert(list.len(found) == 2)
+    match found[0]
+        FormTooLong(n, len, lim) =>
+            test.assert(n == "s")
+            test.assert(len == 6)
+            test.assert(lim == 3)
+        _                        => test.assert(false)
+
+    test.case("every kind that reads is not a finding")
+    test.assert(formfield.is_valid(b, [wide, num, lst, formfield.expect_bool("t"),
+                                       formfield.expect_int_between("i", 1, 9)]))
+
+    test.case("an integer outside its bounds is a finding")
+    test.assert(not formfield.is_valid(b, [formfield.expect_int_between("i", 6, 9)]))

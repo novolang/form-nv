@@ -1,0 +1,73 @@
+// formerr_tests.nv — the refusals, the status each maps to, and their
+// messages.
+
+use std.test
+use std.list
+use std.str
+use formerr
+
+fn every_refusal() -> [formerr.FormError]
+    [FormNotMultipart("application/json"), FormNoBoundary("multipart/form-data"),
+     FormNoFieldName(1), FormNoDisposition(1), FormBadHeader(2, 40), FormTruncated(3, 99),
+     FormPartTooLarge(1, "file", 8), FormBodyTooLarge(64), FormTooManyParts(2),
+     FormHeadersTooLarge(1, 16), FormTooManyHeaders(1, 4), FormNameTooLong(1, 8),
+     FormTooManyPairs(10), FormMissing("name"), FormNotAnInt("age", "old"),
+     FormNotAFloat("price", "cheap"), FormNotABool("tick", "maybe"),
+     FormOutOfRange("age", "200", 1, 120), FormTooLong("bio", 900, 500),
+     FormNotAllowed("colour", "purple"), FormEmptyList("tags")]
+
+@test
+fn test_every_refusal_has_a_status() [io]
+    let es = every_refusal()
+
+    test.case("415 for a body that is not multipart")
+    test.assert(formerr.status_for(es[0]) == 415)
+
+    test.case("413 for each of the seven limits")
+    var limits = 0
+    for e in es
+        if formerr.is_limit(e)
+            limits = limits + 1
+            test.assert(formerr.status_for(e) == 413)
+    test.assert(limits == 7)
+    test.assert(formerr.any_limit(es))
+    test.assert(not formerr.any_limit([FormMissing("a")]))
+
+    test.case("400 for the parse refusals and the fields")
+    test.assert(formerr.status_for(es[1]) == 400)
+    test.assert(formerr.status_for(es[13]) == 400)
+
+@test
+fn test_a_refusal_names_its_field_and_its_offset() [io]
+    let es = every_refusal()
+
+    test.case("the field refusals and a part too large name a field")
+    var named = 0
+    for e in es
+        if formerr.error_field(e) != ""
+            named = named + 1
+    test.assert(named == 9)
+    test.assert(formerr.error_field(es[6]) == "file")
+    test.assert(formerr.error_field(es[0]) == "")
+
+    test.case("only a bad header and a truncated body carry an offset")
+    test.assert(formerr.error_at(es[4]) == 40)
+    test.assert(formerr.error_at(es[5]) == 99)
+    test.assert(formerr.error_at(es[0]) == -1)
+
+@test
+fn test_every_message_is_one_line() [io]
+    let es = every_refusal()
+    let text = formerr.messages(es)
+
+    test.case("one line per refusal, in order")
+    let lines = str.split(text, "\n")
+    test.assert(list.len(lines) == list.len(es))
+    test.assert(str.starts_with(lines[0], "the body is `application/json`"))
+
+    test.case("a field's message names it and says what was expected")
+    test.assert(lines[13] == "name is required")
+    test.assert(lines[17] == "age must be between 1 and 120, and `200` is not")
+    test.assert(lines[18] == "bio must be at most 500 bytes, and it is 900")
+    test.assert(lines[20] == "tags needs at least one value")
+    test.assert(formerr.messages([]) == "")

@@ -1,0 +1,37 @@
+// tests/alloc_probe.nv — a program that reaches every function in
+// `formscan`, so the emitted LLVM can be read for a call to the
+// allocator.
+//
+// This is not a test.  `tests/alloc_scan.sh` builds it with `--opt=0`
+// and reads the IR.  At the default optimisation level the probe
+// inlines into `novo_main`, and there would be no function left to
+// attribute an allocation to.  The numbers are printed rather than
+// checked; the suites own correctness.
+
+use formscan
+
+// Every function of the scanner, over a body with an escape, a `+`, a
+// bad escape and two fields.
+fn walk() -> Int
+    var n = formscan.separator() + formscan.assigner() + formscan.plus_means()
+    var s = formscan.scan()
+    for b in [97, 61, 37, 50, 70, 43, 38, 98, 37, 122]
+        s = formscan.scan_byte(s, b)
+        n = n + formscan.scan_out(s) + formscan.scan_out_count(s) + formscan.scan_out_at(s, 1)
+        if formscan.scan_emitted(s) and formscan.scan_in_key(s)
+            n = n + 1
+        if formscan.scan_key_done(s) or formscan.scan_field_done(s)
+            n = n + 1
+        if formscan.scan_has_value(s) or formscan.scan_in_escape(s)
+            n = n + 1
+    s = formscan.scan_end(s)
+    if formscan.scan_bad_escape(s)
+        n = n + 1
+    n = n + formscan.scan_pos(s) + formscan.scan_field_start(s) + formscan.scan_fields(s)
+    n = n + formscan.hex_value(70) + formscan.hex_digit(11) + formscan.encoded_len(38)
+    if formscan.byte_safe(126)
+        n = n + 1
+    n
+
+fn main() [io]
+    println("${walk()}")

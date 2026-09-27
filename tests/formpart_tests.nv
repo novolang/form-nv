@@ -1,19 +1,7 @@
-// formpart_tests.nv — the parser that never holds a part, and the
-// limits that refuse.
-//
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: form-nv.<module>.<fn>`.
-// That is the expected result until the bodies land.
-//
-// THE ASSERTION THIS SUITE EXISTS FOR: after feeding a megabyte of
-// part body, `pending_bytes` is still under the boundary's length plus
-// four. That is the whole security claim of the package, and it is a
-// number rather than a paragraph.
-//
-// THE VECTORS are `multipart`'s own fixture bodies plus the four cases
-// every multipart parser is measured on: a boundary appearing inside a
-// part's body, a part whose headers straddle two chunks, a body with no
-// final `--`, and a `filename` containing a path separator.
+// formpart_tests.nv — the multipart reader, its limits, and the four
+// cases a multipart parser is measured on: a boundary inside a part's
+// body, a header section split across two chunks, a body with no
+// closing delimiter, and a filename holding a path.
 
 use std.test
 use std.list
@@ -54,7 +42,7 @@ fn test_the_reader_never_holds_a_part() [io]
     let step = formpart.drain(r, body())!
     r = step.reader
 
-    test.case("THE CLAIM: the reader holds at most the boundary plus four")
+    test.case("the reader holds at most the boundary plus four bytes")
     test.assert(formpart.pending_bytes(r) <= str.len(b()) + 4)
 
     test.case("and it saw both parts and the close")
@@ -132,7 +120,6 @@ fn test_a_part_ends_knowing_how_long_it_was() [io]
 
 @test
 fn test_a_part_whose_headers_straddle_two_chunks() [io]
-    // THE CASE A LINE-AT-A-TIME PARSER GETS WRONG.
     let whole = body_text()
     let cut = 60
     let first = bytes.from_str(str.slice(whole, 0, cut))
@@ -153,9 +140,8 @@ fn test_a_part_whose_headers_straddle_two_chunks() [io]
 
 @test
 fn test_a_boundary_inside_a_part_body_is_not_a_boundary() [io]
-    // The other case every multipart parser is measured on: the
-    // delimiter is CRLF + `--` + boundary, so the same bytes in the
-    // middle of a line are content.
+    // The delimiter is a line break, `--` and the boundary, so the same
+    // bytes in the middle of a line are content.
     let lines = ["------formnvboundary",
                  "Content-Disposition: form-data; name=\"note\"",
                  "",
@@ -183,7 +169,7 @@ fn test_a_truncated_body_is_told_apart_from_a_complete_one() [io]
     test.case("the close was never seen")
     test.assert(not formpart.is_complete(r))
 
-    test.case("AND FINISH SAYS SO — a failed upload is not a complete one")
+    test.case("and finish refuses it")
     match formpart.finish(r)
         Ok(_)  => test.assert(false)
         Err(e) => test.assert(formerr.status_for(e) == 400)
@@ -251,10 +237,10 @@ fn test_the_boundary_comes_out_of_the_header_and_is_checked() [io]
         Err(_) => test.assert(false)
         Ok(x)  => test.assert(x == "abc123")
 
-    test.case("THE QUOTED FORM, which a split on `;` gets wrong")
-    match formpart.boundary_of("multipart/form-data; boundary=\"a;b c\"")
+    test.case("a quoted boundary, which may hold a colon and a space")
+    match formpart.boundary_of("multipart/form-data; boundary=\"a:b c\"")
         Err(_) => test.assert(false)
-        Ok(x)  => test.assert(x == "a;b c")
+        Ok(x)  => test.assert(x == "a:b c")
 
     test.case("a type that is not multipart is a client at the wrong endpoint")
     match formpart.boundary_of("application/json")
@@ -289,7 +275,7 @@ fn test_a_filename_is_checked_and_not_repaired() [io]
     test.case("an ordinary name is safe")
     test.assert(formpart.filename_is_safe("cat.png"))
 
-    test.case("A CLIENT IS NOT A MISTAKE: a traversal is refused, not rewritten")
+    test.case("a path is refused, not rewritten")
     test.assert(not formpart.filename_is_safe("../../etc/passwd"))
     test.assert(not formpart.filename_is_safe("a/b.png"))
     test.assert(not formpart.filename_is_safe(".."))
@@ -303,7 +289,7 @@ fn test_a_file_part_with_no_content_type_is_text_plain() [io]
     let info = FormPartInfo { name: "f", filename: "a.txt", content_type: "",
                               bytes_so_far: 0, is_file: true }
 
-    test.case("RFC 7578 § 4.4's default, as a function")
+    test.case("RFC 7578 section 4.4's default")
     test.assert(formpart.content_type_or_default(info) == "text/plain")
 
     test.case("and the field still says the client sent none")
@@ -328,12 +314,12 @@ fn test_the_headers_of_a_part_are_readable_beyond_the_three_that_are_decoded() [
     test.assert(list.len(formpart.headers_of(r)) == 2)
 
     test.case("and one a handler reads by name, case-insensitively")
-    test.assert(formpart.header(r, src, "content-transfer-encoding") == "binary")
+    test.assert(formpart.header(r, step.data, "content-transfer-encoding") == "binary")
 
     test.case("the ranges read back against the chunk they arrived in")
     let hs = formpart.headers_of(r)
-    test.assert(formpart.header_name(src, hs[0]) == "Content-Disposition")
-    test.assert(str.contains(formpart.header_value(src, hs[0]), "name="))
+    test.assert(formpart.header_name(step.data, hs[0]) == "Content-Disposition")
+    test.assert(str.contains(formpart.header_value(step.data, hs[0]), "name="))
 
 @test
 fn test_collect_is_bounded_and_has_no_unbounded_twin() [io]
@@ -350,7 +336,7 @@ fn test_collect_is_bounded_and_has_no_unbounded_twin() [io]
     test.case("a repeated name answers every part, the way a multi-file input sends")
     test.assert(list.len(formpart.parts_named(parts, "file")) == 1)
 
-    test.case("AND IT TAKES THE SAME LIMITS, refusing what the streaming path refuses")
+    test.case("and it takes the same limits as the streaming path")
     let tight = FormLimits { max_part_bytes: 4, max_total_bytes: 1048576,
                              max_parts: 8, max_headers_bytes: 8192,
                              max_headers: 8, max_name_bytes: 64 }
@@ -363,5 +349,265 @@ fn test_take_answers_none_when_there_is_nothing_yet() [io]
     let r = formpart.reader(b(), formpart.default_limits())
     let step = formpart.take(r)!
 
-    test.case("`None` is the ordinary case on a socket, not a fault")
+    test.case("an event of None means nothing is complete yet")
     test.assert(step.event == None)
+
+// The reader's answer to a body fed whole: the refusal, or `ok`.
+fn outcome(src: Str, limits: formpart.FormLimits) -> Str
+    match formpart.drain(formpart.reader("xyz", limits), bytes.from_str(src))
+        Ok(d)  =>
+            match formpart.finish(d.reader)
+                Ok(_)  => "ok"
+                Err(e) => formerr.messages([e])
+        Err(e) => formerr.messages([e])
+
+// A body over the boundary `xyz` from lines joined with CRLF.
+fn crlf(lines: [Str]) -> Str
+    list.join(lines, "\r\n")
+
+@test
+fn test_the_html_4_01_example() [io]
+    // HTML 4.01 section 17.13.4, the example RFC 2388 and RFC 7578
+    // descend from.
+    let src = crlf(["--AaB03x",
+                    "Content-Disposition: form-data; name=\"submit-name\"",
+                    "",
+                    "Larry",
+                    "--AaB03x",
+                    "Content-Disposition: form-data; name=\"files\"; filename=\"file1.txt\"",
+                    "Content-Type: text/plain",
+                    "",
+                    "... contents of file1.txt ...",
+                    "--AaB03x--",
+                    ""])
+    let parts = formpart.collect(bytes.from_str(src), "AaB03x", formpart.default_limits())!
+
+    test.case("two parts, a field and a file")
+    test.assert(list.len(parts) == 2)
+    test.assert(parts[0].info.name == "submit-name")
+    test.assert(bytes.to_str(parts[0].bytes) == "Larry")
+    test.assert(not parts[0].info.is_file)
+    test.assert(parts[1].info.filename == "file1.txt")
+    test.assert(formpart.content_type_or_default(parts[1].info) == "text/plain")
+    test.assert(bytes.to_str(parts[1].bytes) == "... contents of file1.txt ...")
+
+    test.case("a name no part has is absent")
+    test.assert(formpart.part_named(parts, "nothing") == None)
+
+@test
+fn test_rfc_7578_section_4_4_example() [io]
+    // The example stops after the part's delimiter, so the body is
+    // truncated, and the part's bytes are read as they are: a
+    // quoted-printable part is not decoded.
+    let src = crlf(["--AaB03x",
+                    "content-disposition: form-data; name=\"field1\"",
+                    "content-type: text/plain;charset=UTF-8",
+                    "content-transfer-encoding: quoted-printable",
+                    "",
+                    "Joe owes =E2=82=AC100.",
+                    "--AaB03x"])
+    let d = formpart.drain(formpart.reader("AaB03x", formpart.default_limits()),
+                           bytes.from_str(src))!
+
+    test.case("the header names are read ignoring case")
+    var seen = ""
+    for e in d.events
+        match e
+            FormPartStart(info) =>
+                seen = info.content_type
+            FormBodyChunk(s, t) => test.assert(bytes.to_str(bytes.slice(d.data, s, t)) == "Joe owes =E2=82=AC100.")
+            _                   => ()
+    test.assert(seen == "text/plain;charset=UTF-8")
+
+    test.case("and the body has no closing delimiter")
+    test.assert(not formpart.is_complete(d.reader))
+    match formpart.finish(d.reader)
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            test.assert(formerr.error_at(e) == str.len(src))
+            match e
+                FormTruncated(i, _) => test.assert(i == 1)
+                _                   => test.assert(false)
+
+@test
+fn test_a_preamble_and_an_epilogue_are_skipped() [io]
+    let src = crlf(["this is a preamble", "--xyz", "Content-Disposition: form-data; name=a", "",
+                    "1", "--xyz--", "an epilogue"])
+
+    test.case("a preamble is read past, and an epilogue ignored")
+    test.assert(outcome(src, formpart.default_limits()) == "ok")
+
+    test.case("a chunk after the close is counted and ignored")
+    let d = formpart.drain(formpart.reader("xyz", formpart.default_limits()), bytes.from_str(src))!
+    let more = formpart.drain(d.reader, bytes.from_str("more epilogue"))!
+    test.assert(list.len(more.events) == 0)
+    test.assert(formpart.total_bytes(more.reader) == str.len(src) + 13)
+    test.assert(formpart.pending_bytes(more.reader) == 0)
+
+    test.case("a preamble fed a byte at a time holds no more than a delimiter")
+    var r = formpart.reader("xyz", formpart.default_limits())
+    var most = 0
+    var names = 0
+    for i in 0..str.len(src)
+        let d1 = formpart.drain(r, bytes.from_str(str.slice(src, i, i + 1)))!
+        r = d1.reader
+        if formpart.pending_bytes(r) > most and formpart.phase_of(r) == FormPreamble
+            most = formpart.pending_bytes(r)
+        for e in d1.events
+            match e
+                FormPartStart(info) =>
+                    test.assert(info.name == "a")
+                    names = names + 1
+                _                   => ()
+    test.assert(most <= 3 + 4)
+    test.assert(names == 1)
+    test.assert(formpart.is_complete(r))
+
+@test
+fn test_a_delimiter_line_may_carry_padding() [io]
+    test.case("spaces and tabs after the boundary are transport padding")
+    let src = "--xyz \t\r\nContent-Disposition: form-data; name=a\r\n\r\n1\r\n--xyz--"
+    test.assert(outcome(src, formpart.default_limits()) == "ok")
+
+    test.case("anything else after the boundary is refused")
+    let bad = "--xyzQ\r\nContent-Disposition: form-data; name=a\r\n\r\n1\r\n--xyz--"
+    test.assert(str.contains(outcome(bad, formpart.default_limits()), "at byte 5"))
+
+@test
+fn test_a_header_section_that_is_not_one_is_refused() [io]
+    test.case("a line with no colon, or no name before it")
+    test.assert(str.contains(outcome("--xyz\r\nnot a header\r\n\r\nx\r\n--xyz--", formpart.default_limits()),
+        "is not `Name: value`"))
+    test.assert(str.contains(outcome("--xyz\r\n: value\r\n\r\nx\r\n--xyz--", formpart.default_limits()),
+        "is not `Name: value`"))
+    test.assert(str.contains(outcome("--xyz\r\nBad Name: v\r\n\r\nx\r\n--xyz--", formpart.default_limits()),
+        "is not `Name: value`"))
+
+    test.case("no Content-Disposition, or one that is not form-data")
+    test.assert(str.contains(outcome("--xyz\r\n\r\nx\r\n--xyz--", formpart.default_limits()), "no Content-Disposition"))
+    test.assert(str.contains(outcome("--xyz\r\nContent-Disposition: attachment; name=a\r\n\r\nx\r\n--xyz--",
+        formpart.default_limits()),
+    "no Content-Disposition"))
+
+    test.case("a form-data part with no name")
+    test.assert(str.contains(outcome("--xyz\r\nContent-Disposition: form-data; filename=a.txt\r\n\r\nx\r\n--xyz--",
+        formpart.default_limits()),
+    "no field name"))
+
+    test.case("more header fields than the bound")
+    let few = FormLimits { max_part_bytes: 1024, max_total_bytes: 4096, max_parts: 8,
+                           max_headers_bytes: 1024, max_headers: 1, max_name_bytes: 64 }
+    test.assert(str.contains(outcome("--xyz\r\nContent-Disposition: form-data; name=a\r\nX-A: 1\r\n\r\nx\r\n--xyz--", few),
+        "more than 1 header fields"))
+
+@test
+fn test_a_header_section_split_across_chunks_is_bounded() [io]
+    let small = FormLimits { max_part_bytes: 1024, max_total_bytes: 4096, max_parts: 8,
+                             max_headers_bytes: 16, max_headers: 8, max_name_bytes: 64 }
+
+    test.case("an incomplete header section is held while it is within the bound")
+    let d = formpart.drain(formpart.reader("xyz", small), bytes.from_str("--xyz\r\nX-A: 1"))!
+    test.assert(formpart.pending_bytes(d.reader) == 6)
+    test.assert(formpart.phase_of(d.reader) == FormHeaders)
+
+    test.case("and refused as soon as it is past it")
+    match formpart.drain(d.reader, bytes.from_str("234567890123"))
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e
+                FormHeadersTooLarge(i, lim) =>
+                    test.assert(i == 1)
+                    test.assert(lim == 16)
+                _                           => test.assert(false)
+
+    test.case("a delimiter split after the boundary waits for its line")
+    let a = formpart.drain(formpart.reader("xyz", formpart.default_limits()), bytes.from_str("--xyz"))!
+    test.assert(formpart.pending_bytes(a.reader) == 0)
+    let b2 = formpart.drain(a.reader, bytes.from_str(" "))!
+    test.assert(formpart.pending_bytes(b2.reader) == 1)
+    let c = formpart.drain(b2.reader, bytes.from_str("\r\nContent-Disposition: form-data; name=a\r\n\r"))!
+    test.assert(list.len(c.events) == 0)
+    let e2 = formpart.drain(c.reader, bytes.from_str("\n1\r\n--xyz--"))!
+    test.assert(formpart.is_complete(e2.reader))
+
+@test
+fn test_disposition_parameters() [io]
+    let src = crlf(["--xyz",
+                    "Content-Disposition: form-data ; ; x ; name = \"a\\\"b\" ; filename=plain.txt ;",
+                    "",
+                    "1",
+                    "--xyz",
+                    "Content-Disposition: form-data; name=\"unclosed",
+                    "",
+                    "2",
+                    "--xyz--"])
+    let parts = formpart.collect(bytes.from_str(src), "xyz", formpart.default_limits())!
+
+    test.case("a quoted value is unescaped and an unquoted one trimmed")
+    test.assert(parts[0].info.name == "a\"b")
+    test.assert(parts[0].info.filename == "plain.txt")
+    test.assert(parts[0].info.is_file)
+
+    test.case("an unclosed quoted value runs to the end of the header")
+    test.assert(parts[1].info.name == "unclosed")
+
+    test.case("a part's content type is its own")
+    test.assert(formpart.content_type_or_default(FormPartInfo { name: "f",
+        filename: "",
+        content_type: "image/png",
+        bytes_so_far: 0,
+        is_file: true }) == "image/png")
+
+    test.case("a header a part did not send is the empty string")
+    let d = formpart.feed(formpart.reader("xyz", formpart.default_limits()), bytes.from_str(src))!
+    test.assert(formpart.header(d.reader, d.data, "x-missing") == "")
+    test.assert(formpart.header(d.reader, d.data, "CONTENT-DISPOSITION") != "")
+
+@test
+fn test_the_boundary_grammar() [io]
+    test.case("seventy bytes is the longest boundary")
+    test.assert(formpart.boundary_ok(str.repeat("a", 70)))
+    test.assert(not formpart.boundary_ok(str.repeat("a", 71)))
+
+    test.case("a byte outside the set is refused")
+    test.assert(not formpart.boundary_ok("a;b"))
+    test.assert(formpart.boundary_ok("'()+_,-./:=? x"))
+
+    test.case("a header that is not a media type at all is not multipart")
+    match formpart.boundary_of("not a type")
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(formerr.status_for(e) == 415)
+
+    test.case("a boundary outside the grammar is no boundary")
+    match formpart.boundary_of("multipart/form-data; boundary=\"a;b\"")
+        Ok(_)  => test.assert(false)
+        Err(e) =>
+            match e
+                FormNoBoundary(_) => test.assert(true)
+                _                 => test.assert(false)
+
+@test
+fn test_filenames_with_control_bytes_and_backslashes() [io]
+    test.case("a backslash is a separator on Windows, and a control byte is refused")
+    test.assert(not formpart.filename_is_safe("a\\b.png"))
+    test.assert(not formpart.filename_is_safe("a\nb.png"))
+    test.assert(not formpart.filename_is_safe("a\x7fb.png"))
+    test.assert(formpart.filename_is_safe("..hidden"))
+
+@test
+fn test_header_values_and_padding_at_a_chunk_end() [io]
+    test.case("padding that reaches the end of a chunk waits for the line break")
+    let a = formpart.drain(formpart.reader("xyz", formpart.default_limits()), bytes.from_str("--xyz  "))!
+    test.assert(formpart.pending_bytes(a.reader) == 2)
+    let b2 = formpart.drain(a.reader,
+        bytes.from_str("\r\nContent-Disposition: form-data; name=\"\\a\\b\r\nX-Empty:\r\nX-Pad: v  \r\n\r\n1\r\n--xyz--"))!
+    test.assert(formpart.is_complete(b2.reader))
+
+    test.case("an escape in an unclosed quoted value is read, and values are trimmed")
+    var name = ""
+    for e in b2.events
+        match e
+            FormPartStart(info) =>
+                name = info.name
+            _                   => ()
+    test.assert(name == "ab")

@@ -1,0 +1,219 @@
+// differential_tests.nv — Python's urllib.parse and email packages as
+// a second opinion.
+//
+// Written by tools/differential.py with Python 3.12.3.  The tool's
+// docstring says which cases are used and why.
+
+use std.test
+use std.list
+use std.str
+use std.bytes
+use formurl
+use formpart
+
+// Every pair of a body as `name=value`, decoded, joined with `|`.
+fn pairs_of(src: Str) -> Str
+    let b = formurl.parse_str(src)
+    var out: [Str] = []
+    for p in b.pairs
+        list.push(out, formurl.key_str(b, p) + "=" + formurl.value_str(b, p))
+    str.join(out, "|")
+
+@test
+fn test_python_parse_qsl_reads_the_same_pairs() [io]
+    test.assert(pairs_of("=%41&é&%41%41+") == "=A|é=|AA =")
+    test.assert(pairs_of("+.%2B%41+24z=F%41") == " .+A 24z=FA")
+    test.assert(pairs_of("%26b %") == "&b %=")
+    test.assert(pairs_of("bF2") == "bF2=")
+    test.assert(pairs_of("") == "")
+    test.assert(pairs_of("~..F1z%41%C3%A9%41") == "~..F1zAéA=")
+    test.assert(pairs_of("%C3%A9bF.%2B%2B~&F") == "ébF.++~=|F=")
+    test.assert(pairs_of("b=%a") == "b=%a")
+    test.assert(pairs_of("%%41%2Ba%41+~2%3D= ") == "%A+aA ~2== ")
+    test.assert(pairs_of("%26%C3%A9b") == "&éb=")
+    test.assert(pairs_of("%3Daé4%=.+=2é") == "=aé4%=. =2é")
+    test.assert(pairs_of("+%&~zz+%%C3%A9") == " %=|~zz %é=")
+    test.assert(pairs_of("%3D") == "==")
+    test.assert(pairs_of("é&%2B") == "é=|+=")
+    test.assert(pairs_of("22%26&") == "22&=")
+    test.assert(pairs_of("%2Bb2.b21z") == "+b2.b21z=")
+    test.assert(pairs_of("") == "")
+    test.assert(pairs_of("=") == "=")
+    test.assert(pairs_of("%C3%A9===%41~ %F=") == "é===A~ %F=")
+    test.assert(pairs_of("bF%26aFF") == "bF&aFF=")
+    test.assert(pairs_of(".z41 2%2B.z=") == ".z41 2+.z=")
+    test.assert(pairs_of("") == "")
+    test.assert(pairs_of(" % b=+%2B+bz ") == " % b= + bz ")
+    test.assert(pairs_of("%41&z=%%2B+ aa11=") == "A=|z=%+  aa11=")
+    test.assert(pairs_of("%2B%26é==&é4=") == "+&é==|é4=")
+    test.assert(pairs_of("&%26&%3Dz.+42z.") == "&=|=z. 42z.=")
+    test.assert(pairs_of("é22 4%412") == "é22 4A2=")
+    test.assert(pairs_of("&z") == "z=")
+    test.assert(pairs_of("2&%2B%2B~2%26") == "2=|++~2&=")
+    test.assert(pairs_of("b%2B") == "b+=")
+    test.assert(pairs_of("%26é") == "&é=")
+    test.assert(pairs_of("=b+%41&F%26ééé") == "=b A|F&ééé=")
+    test.assert(pairs_of("%%41") == "%A=")
+    test.assert(pairs_of("") == "")
+    test.assert(pairs_of("~") == "~=")
+    test.assert(pairs_of("%26=~1F%2B") == "&=~1F+")
+    test.assert(pairs_of("%41b1+~~%41%3D1%26 ") == "Ab1 ~~A=1& =")
+    test.assert(pairs_of("ba.") == "ba.=")
+    test.assert(pairs_of("%26=") == "&=")
+    test.assert(pairs_of("%3D%C3%A9F%b") == "=éF%b=")
+
+@test
+fn test_python_urlencode_writes_the_same_body() [io]
+    test.assert(formurl.serialise([("", " ")]) == "=+")
+    test.assert(formurl.serialise([("", "_-é.*"), ("", ""), ("€", "+\t=+")]) == "=_-%C3%A9.*&=&%E2%82%AC=%2B%09%3D%2B")
+    test.assert(formurl.serialise([("0&", "€\t0"), ("0?.€", ".0")]) == "0%26=%E2%82%AC%090&0%3F.%E2%82%AC=.0")
+    test.assert(formurl.serialise([("", "&é& ")]) == "=%26%C3%A9%26+")
+    test.assert(formurl.serialise([(" =9", ""), ("--", "?"), ("Z", "")]) == "+%3D9=&--=%3F&Z=")
+    test.assert(formurl.serialise([("-", "_é=Z"), ("--&&", "_9")]) == "-=_%C3%A9%3DZ&--%26%26=_9")
+    test.assert(formurl.serialise([("&", "\t /."), ("a", "éZZ ?")]) == "%26=%09+%2F.&a=%C3%A9ZZ+%3F")
+    test.assert(formurl.serialise([("\t", "?*a*"), ("\t", "a_a")]) == "%09=%3F*a*&%09=a_a")
+    test.assert(formurl.serialise([("?", "+_/9")]) == "%3F=%2B_%2F9")
+    test.assert(formurl.serialise([("\ta=€", "9+&a")]) == "%09a%3D%E2%82%AC=9%2B%26a")
+    test.assert(formurl.serialise([(".9", "")]) == ".9=")
+    test.assert(formurl.serialise([("+99", "Z&_"), ("+", "a*-_")]) == "%2B99=Z%26_&%2B=a*-_")
+    test.assert(formurl.serialise([("9", "\t&?\t"), ("", "_")]) == "9=%09%26%3F%09&=_")
+    test.assert(formurl.serialise([("=?=9", ""), ("€", "Zé"), ("+", "\t= .")]) == "%3D%3F%3D9=&%E2%82%AC=Z%C3%A9&%2B=%09%3D+.")
+    test.assert(formurl.serialise([(" \t", "+"), ("", "Z_"), ("ZZ/é", "*€")]) == "+%09=%2B&=Z_&ZZ%2F%C3%A9=*%E2%82%AC")
+    test.assert(formurl.serialise([("=\t- ", "")]) == "%3D%09-+=")
+    test.assert(formurl.serialise([("**", "€+"), ("", "?a"), ("é", "0a+ *")]) == "**=%E2%82%AC%2B&=%3Fa&%C3%A9=0a%2B+*")
+    test.assert(formurl.serialise([("", "+")]) == "=%2B")
+    test.assert(formurl.serialise([("€9_", "/-&-")]) == "%E2%82%AC9_=%2F-%26-")
+    test.assert(formurl.serialise([("", ""), ("", "*&&")]) == "=&=*%26%26")
+    test.assert(formurl.serialise([("/", "=Z")]) == "%2F=%3DZ")
+    test.assert(formurl.serialise([("", "€"), ("é", "*"), ("\t\t&&", "ZZ_éé")]) == "=%E2%82%AC&%C3%A9=*&%09%09%26%26=ZZ_%C3%A9%C3%A9")
+    test.assert(formurl.serialise([("_€\t", "*.&"), ("9.", "")]) == "_%E2%82%AC%09=*.%26&9.=")
+    test.assert(formurl.serialise([("", "9&"), ("=", "?9€/?")]) == "=9%26&%3D=%3F9%E2%82%AC%2F%3F")
+    test.assert(formurl.serialise([("\tZZ", ""), ("9/", "€.é")]) == "%09ZZ=&9%2F=%E2%82%AC.%C3%A9")
+    test.assert(formurl.serialise([("", "€*"), ("a*+-", " +.")]) == "=%E2%82%AC*&a*%2B-=+%2B.")
+    test.assert(formurl.serialise([("a0", "/ 0 "), ("", ""), ("", "")]) == "a0=%2F+0+&=&=")
+    test.assert(formurl.serialise([("&?", "9*-?Z")]) == "%26%3F=9*-%3FZ")
+    test.assert(formurl.serialise([("=-", "?")]) == "%3D-=%3F")
+    test.assert(formurl.serialise([("0++", "a_ "), ("+", "")]) == "0%2B%2B=a_+&%2B=")
+
+@test
+fn test_python_email_reads_the_same_parts() [io]
+    let p0 = formpart.collect(bytes.from_str("--b3f6faed7557e\r\nContent-Disposition: form-data; name=\"f0\"\r\n\r\nb e t aé\r\n--b3f6faed7557e\r\nContent-Disposition: form-data; name=\"f1\"; filename=\"file1.txt\"\r\nContent-Type: text/plain\r\n\r\nb e t aline one\r\nline two\r\n--b3f6faed7557e--\r\n"),
+        "b3f6faed7557e",
+        formpart.default_limits())!
+    test.assert(list.len(p0) == 2)
+    test.assert(p0[0].info.name == "f0")
+    test.assert(p0[0].info.filename == "")
+    test.assert(bytes.to_str(p0[0].bytes) == "b e t aé")
+    test.assert(p0[1].info.name == "f1")
+    test.assert(p0[1].info.filename == "file1.txt")
+    test.assert(bytes.to_str(p0[1].bytes) == "b e t aline one\r\nline two")
+    let p1 = formpart.collect(bytes.from_str("--b90aa88df6df5\r\nContent-Disposition: form-data; name=\"f0\"; filename=\"file0.txt\"\r\nContent-Type: text/plain\r\n\r\nline one\r\nline two\r\n--b90aa88df6df5\r\nContent-Disposition: form-data; name=\"f1\"; filename=\"file1.txt\"\r\nContent-Type: text/plain\r\n\r\na=b; c\r\n--b90aa88df6df5--\r\n"),
+        "b90aa88df6df5",
+        formpart.default_limits())!
+    test.assert(list.len(p1) == 2)
+    test.assert(p1[0].info.name == "f0")
+    test.assert(p1[0].info.filename == "file0.txt")
+    test.assert(bytes.to_str(p1[0].bytes) == "line one\r\nline two")
+    test.assert(p1[1].info.name == "f1")
+    test.assert(p1[1].info.filename == "file1.txt")
+    test.assert(bytes.to_str(p1[1].bytes) == "a=b; c")
+    let p2 = formpart.collect(bytes.from_str("--be0a5b9377c54\r\nContent-Disposition: form-data; name=\"f0\"\r\n\r\né--\r\n--be0a5b9377c54\r\nContent-Disposition: form-data; name=\"f1\"\r\n\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n--be0a5b9377c54\r\nContent-Disposition: form-data; name=\"f2\"; filename=\"file2.txt\"\r\nContent-Type: text/plain\r\n\r\n\r\n--be0a5b9377c54--\r\n"),
+        "be0a5b9377c54",
+        formpart.default_limits())!
+    test.assert(list.len(p2) == 3)
+    test.assert(p2[0].info.name == "f0")
+    test.assert(p2[0].info.filename == "")
+    test.assert(bytes.to_str(p2[0].bytes) == "é--")
+    test.assert(p2[1].info.name == "f1")
+    test.assert(p2[1].info.filename == "")
+    test.assert(bytes.to_str(p2[1].bytes) == "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    test.assert(p2[2].info.name == "f2")
+    test.assert(p2[2].info.filename == "file2.txt")
+    test.assert(bytes.to_str(p2[2].bytes) == "")
+    let p3 = formpart.collect(bytes.from_str("--bc19de81fe027\r\nContent-Disposition: form-data; name=\"f0\"\r\n\r\néline one\r\nline two\r\n--bc19de81fe027\r\nContent-Disposition: form-data; name=\"f1\"\r\n\r\nb e t aé\r\n--bc19de81fe027\r\nContent-Disposition: form-data; name=\"f2\"\r\n\r\néé\r\n--bc19de81fe027--\r\n"),
+        "bc19de81fe027",
+        formpart.default_limits())!
+    test.assert(list.len(p3) == 3)
+    test.assert(p3[0].info.name == "f0")
+    test.assert(p3[0].info.filename == "")
+    test.assert(bytes.to_str(p3[0].bytes) == "éline one\r\nline two")
+    test.assert(p3[1].info.name == "f1")
+    test.assert(p3[1].info.filename == "")
+    test.assert(bytes.to_str(p3[1].bytes) == "b e t aé")
+    test.assert(p3[2].info.name == "f2")
+    test.assert(p3[2].info.filename == "")
+    test.assert(bytes.to_str(p3[2].bytes) == "éé")
+    let p4 = formpart.collect(bytes.from_str("--bed70ad29d778\r\nContent-Disposition: form-data; name=\"f0\"; filename=\"file0.txt\"\r\nContent-Type: text/plain\r\n\r\nalphaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n--bed70ad29d778--\r\n"),
+        "bed70ad29d778",
+        formpart.default_limits())!
+    test.assert(list.len(p4) == 1)
+    test.assert(p4[0].info.name == "f0")
+    test.assert(p4[0].info.filename == "file0.txt")
+    test.assert(bytes.to_str(p4[0].bytes) == "alphaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    let p5 = formpart.collect(bytes.from_str("--bc5890829340c\r\nContent-Disposition: form-data; name=\"f0\"\r\n\r\néb e t a\r\n--bc5890829340c\r\nContent-Disposition: form-data; name=\"f1\"\r\n\r\nalphaa=b; c\r\n--bc5890829340c--\r\n"),
+        "bc5890829340c",
+        formpart.default_limits())!
+    test.assert(list.len(p5) == 2)
+    test.assert(p5[0].info.name == "f0")
+    test.assert(p5[0].info.filename == "")
+    test.assert(bytes.to_str(p5[0].bytes) == "éb e t a")
+    test.assert(p5[1].info.name == "f1")
+    test.assert(p5[1].info.filename == "")
+    test.assert(bytes.to_str(p5[1].bytes) == "alphaa=b; c")
+    let p6 = formpart.collect(bytes.from_str("--b92d487aacc3b\r\nContent-Disposition: form-data; name=\"f0\"; filename=\"file0.txt\"\r\nContent-Type: text/plain\r\n\r\nline one\r\nline twoxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n--b92d487aacc3b--\r\n"),
+        "b92d487aacc3b",
+        formpart.default_limits())!
+    test.assert(list.len(p6) == 1)
+    test.assert(p6[0].info.name == "f0")
+    test.assert(p6[0].info.filename == "file0.txt")
+    test.assert(bytes.to_str(p6[0].bytes) == "line one\r\nline twoxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    let p7 = formpart.collect(bytes.from_str("--b3999a2b5ad21\r\nContent-Disposition: form-data; name=\"f0\"\r\n\r\n\r\n--b3999a2b5ad21\r\nContent-Disposition: form-data; name=\"f1\"\r\n\r\nb e t aalpha\r\n--b3999a2b5ad21--\r\n"),
+        "b3999a2b5ad21",
+        formpart.default_limits())!
+    test.assert(list.len(p7) == 2)
+    test.assert(p7[0].info.name == "f0")
+    test.assert(p7[0].info.filename == "")
+    test.assert(bytes.to_str(p7[0].bytes) == "")
+    test.assert(p7[1].info.name == "f1")
+    test.assert(p7[1].info.filename == "")
+    test.assert(bytes.to_str(p7[1].bytes) == "b e t aalpha")
+    let p8 = formpart.collect(bytes.from_str("--b9d34f973de09\r\nContent-Disposition: form-data; name=\"f0\"; filename=\"file0.txt\"\r\nContent-Type: text/plain\r\n\r\n--\r\n--b9d34f973de09\r\nContent-Disposition: form-data; name=\"f1\"\r\n\r\n----\r\n--b9d34f973de09--\r\n"),
+        "b9d34f973de09",
+        formpart.default_limits())!
+    test.assert(list.len(p8) == 2)
+    test.assert(p8[0].info.name == "f0")
+    test.assert(p8[0].info.filename == "file0.txt")
+    test.assert(bytes.to_str(p8[0].bytes) == "--")
+    test.assert(p8[1].info.name == "f1")
+    test.assert(p8[1].info.filename == "")
+    test.assert(bytes.to_str(p8[1].bytes) == "----")
+    let p9 = formpart.collect(bytes.from_str("--b55c76d66d671\r\nContent-Disposition: form-data; name=\"f0\"; filename=\"file0.txt\"\r\nContent-Type: text/plain\r\n\r\nalphaalpha\r\n--b55c76d66d671\r\nContent-Disposition: form-data; name=\"f1\"\r\n\r\néxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n--b55c76d66d671--\r\n"),
+        "b55c76d66d671",
+        formpart.default_limits())!
+    test.assert(list.len(p9) == 2)
+    test.assert(p9[0].info.name == "f0")
+    test.assert(p9[0].info.filename == "file0.txt")
+    test.assert(bytes.to_str(p9[0].bytes) == "alphaalpha")
+    test.assert(p9[1].info.name == "f1")
+    test.assert(p9[1].info.filename == "")
+    test.assert(bytes.to_str(p9[1].bytes) == "éxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    let p10 = formpart.collect(bytes.from_str("--bb9a4dfab3fcb\r\nContent-Disposition: form-data; name=\"f0\"\r\n\r\nalphaé\r\n--bb9a4dfab3fcb\r\nContent-Disposition: form-data; name=\"f1\"\r\n\r\n--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n--bb9a4dfab3fcb--\r\n"),
+        "bb9a4dfab3fcb",
+        formpart.default_limits())!
+    test.assert(list.len(p10) == 2)
+    test.assert(p10[0].info.name == "f0")
+    test.assert(p10[0].info.filename == "")
+    test.assert(bytes.to_str(p10[0].bytes) == "alphaé")
+    test.assert(p10[1].info.name == "f1")
+    test.assert(p10[1].info.filename == "")
+    test.assert(bytes.to_str(p10[1].bytes) == "--xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    let p11 = formpart.collect(bytes.from_str("--bf1ef9a029afb\r\nContent-Disposition: form-data; name=\"f0\"\r\n\r\né\r\n--bf1ef9a029afb\r\nContent-Disposition: form-data; name=\"f1\"; filename=\"file1.txt\"\r\nContent-Type: text/plain\r\n\r\nline one\r\nline twoline one\r\nline two\r\n--bf1ef9a029afb--\r\n"),
+        "bf1ef9a029afb",
+        formpart.default_limits())!
+    test.assert(list.len(p11) == 2)
+    test.assert(p11[0].info.name == "f0")
+    test.assert(p11[0].info.filename == "")
+    test.assert(bytes.to_str(p11[0].bytes) == "é")
+    test.assert(p11[1].info.name == "f1")
+    test.assert(p11[1].info.filename == "file1.txt")
+    test.assert(bytes.to_str(p11[1].bytes) == "line one\r\nline twoline one\r\nline two")

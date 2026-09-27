@@ -5,7 +5,7 @@ All notable changes to form-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
-## 0.1.0 — 2026-09-27
+## 0.1.0 — 2026-09-28
 
 The first implementation of the interface published as 0.0.1: the
 WHATWG urlencoded parser and serialiser, the multipart reader with its
@@ -48,10 +48,8 @@ These break code written against 0.0.x.
 
 ### Toolchain
 
-- The toolchain floor is 0.13.0, and mime-nv is `^0.1.0`.
-- `formfield.check` matches each read's `Result` where it is made.  The
-  0.13.0 compiler frees a `Result` payload that a helper function
-  answers wrapped in `Some`.
+- The toolchain floor is 0.14.0, and mime-nv is `^0.1.0`.  The bodies
+  target novo 0.14.0 and carry no workaround for a compiler defect.
 
 ## 0.0.2 — 2026-09-15
 

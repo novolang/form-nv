@@ -1,96 +1,69 @@
-// formpart.nv — `multipart/form-data`, as a parser that never holds a
-// part.
+// formpart.nv — `multipart/form-data`, read without holding a part.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// A multipart body (RFC 7578, over RFC 2046 section 5.1) is a series of
+// parts, each a header section and a body, between delimiter lines of
+// `--` and a boundary.  It is how a browser uploads a file.
 //
-// THE LOAD-BEARING INTERFACE IS `FormEvent`, and the argument for it is
-// a security one rather than an efficiency one.
+// A reader is fed the body a chunk at a time and answers events: a
+// part's headers are complete, some of a part's body, a part ended,
+// the body ended.  A body event is a range of bytes, not a copy of
+// them, so a handler writes each range to disk or into a hash and the
+// reader never holds a part.  `collect` gathers whole parts, for a
+// caller that has the whole body in memory already, and it takes the
+// same limits.
 //
-// A multipart body is how a file upload arrives.  The obvious API —
-// `parse(body: Bytes) -> [FormPart]` with a `value: Bytes` on each
-// part — makes an upload endpoint's memory the CLIENT's decision: the
-// server holds every byte of every part before it can look at any of
-// them, and a request that claims to be a 4 GB video is 4 GB of
-// server memory before a single check has run.  Every framework that
-// shipped that API has shipped the advisory afterwards.
+// The ranges in an event index the `data` of the step that answered it.
+// `data` is the chunk just fed when the reader held nothing back from
+// the chunk before, which is the usual case.  Otherwise it is the bytes
+// held back followed by the chunk.  The reader holds bytes back in two
+// places: at the end of a chunk that ends in what may be the start of a
+// delimiter, at most the boundary's length plus three bytes, and in a
+// part's header section that is not yet complete, at most
+// `max_headers_bytes`.  `pending_bytes` answers how many it holds.
 //
-// So this one is feed and drain over events:
+// Each limit in `FormLimits` stops the parse with a named refusal when
+// it is crossed, before the reader goes further.
 //
-//     var r = formpart.reader(boundary, formpart.default_limits())
-//     let step = formpart.feed(r, chunk)!
-//     // step.event is None, or a header, or a body range, or a part end
-//
-// and `FormBodyChunk` carries a RANGE INTO THE CHUNK THE CALLER JUST
-// FED.  The reader holds no part, no part's bytes, and nothing whose
-// size the client chooses.  A handler streams each chunk to disk, to a
-// hash, or to a bounded buffer of its own; a handler that wants the
-// whole part in memory writes the three lines that accumulate it, and
-// the fact that those three lines are the handler's is the point.
-//
-// THE LIMITS REFUSE RATHER THAN GROW.  `FormLimits` is parameters, not
-// advice: a part longer than `max_part_bytes`, a body longer than
-// `max_total_bytes`, more than `max_parts` parts, a header section
-// longer than `max_headers_bytes` — each stops the parse with a named
-// refusal at the byte the bound was crossed, before the byte after it
-// has been read.  A limit that was checked afterwards would be a
-// limit the attacker has already spent.
-//
-// ONE EVENT PER CALL, and `event: None` means "not yet" rather than
-// "never".  A partial part is the normal case on a socket, and a codec
-// that reported it as an error would have every caller filtering one
-// error variant out of its logs forever.  http-codec-nv draws the same
-// line for the same reason.
+// A reader answers one event per call, and an event of `None` means
+// that no complete event is in what it has been fed yet.  On a socket
+// that is the ordinary case.
 
+use std.bytes
+use std.list
+use std.str
 use formerr
 use mimetype
 
 // What a reader is looking at.
-//
-// The state is public because a server deciding whether to keep reading
-// a connection asks it, and because an opaque state machine whose
-// progress cannot be inspected is one nobody can debug.
 pub enum FormPhase
-    // Before the first boundary.
+    // Before the first delimiter.
     FormPreamble
-    // In a part's header section.
+    // In a delimiter's line or a part's header section.
     FormHeaders
     // In a part's body.
     FormBodyPhase
-    // After the closing boundary.
+    // After the closing delimiter.
     FormDone
 
-// What a reader will refuse to grow past.
-//
-// Every one of these exists because the corresponding unbounded version
-// is a denial of service that costs the attacker one open socket.  They
-// are a value the caller owns rather than constants this package chose,
-// because an upload endpoint and a settings form want numbers three
-// orders of magnitude apart.
+// What a reader refuses to grow past.
 pub struct FormLimits
-    // Bytes in one part's body.  Exceeding it is `FormPartTooLarge`.
+    // Bytes in one part's body.  Passing it is `FormPartTooLarge`.
     max_part_bytes: Int
-    // Bytes in the whole body, headers and boundaries included.
-    // Exceeding it is `FormBodyTooLarge`.  Separate from the per-part
-    // bound because a thousand small parts is the other shape of the
-    // same attack.
+    // Bytes in the whole body, delimiters and headers included.
+    // Passing it is `FormBodyTooLarge`.
     max_total_bytes: Int
-    // Parts in one body.  Exceeding it is `FormTooManyParts`.
+    // Parts in one body.  Passing it is `FormTooManyParts`.
     max_parts: Int
-    // Bytes in one part's header section, before the blank line.
-    // Exceeding it is `FormHeadersTooLarge`.
+    // Bytes in one part's header section.  Passing it is
+    // `FormHeadersTooLarge`.
     max_headers_bytes: Int
-    // Header fields in one part.  Exceeding it is `FormTooManyHeaders`.
+    // Header fields in one part.  Passing it is `FormTooManyHeaders`.
     max_headers: Int
-    // Bytes in one field NAME, from `Content-Disposition`'s `name`
-    // parameter.  A name is a key a handler looks up; one of a
-    // megabyte is not a key.
+    // Bytes in one field name.  Passing it is `FormNameTooLong`.
     max_name_bytes: Int
 
-// One header field of one part, as ranges into the chunk it arrived in.
-//
-// Ranges rather than strings for the same reason the body is: a part
-// with fifty headers should cost fifty pairs of integers, and the
-// handler that reads two of them pays for two.
+// One header field of the part that has just started, as ranges into
+// the `data` of the step that completed its header section.
 pub struct FormHeaderField
     name_start: Int
     name_end: Int
@@ -98,101 +71,81 @@ pub struct FormHeaderField
     value_end: Int
 
 // What a part is, once its headers are in.
-//
-// The three facts RFC 7578 puts in `Content-Disposition` and
-// `Content-Type`, decoded, because these are small by construction —
-// `max_name_bytes` is what makes that true — and because every handler
-// needs all three to dispatch.
 pub struct FormPartInfo
-    // The form field's name.  Required by RFC 7578 § 4.2; a part
-    // without one is `FormNoFieldName`.
+    // The field name, from `Content-Disposition`'s `name` parameter.
     name: Str
-    // The client's filename, or empty when the part is not a file.
-    // NOT a path: § 4.2 says the client should send a basic name, and
-    // `filename_is_safe` is how a server checks before it uses one —
-    // because a client that sends `../../etc/passwd` is a client, not
-    // a mistake.
+    // The `filename` parameter, or empty.  It is the client's text and
+    // may hold a path; `filename_is_safe` checks it.
     filename: Str
-    // The part's own `Content-Type`, or empty.  A file part without one
-    // is `text/plain` under § 4.4, and `content_type_or_default` is
-    // that rule rather than a default this package wrote into the
-    // field.
+    // The part's own `Content-Type`, or empty.
     content_type: Str
-    // How many bytes of this part's body have been drained so far.
-    // Answered on the part-end event as the part's length, and readable
-    // mid-part by a handler showing progress.
+    // How many bytes of the part's body have been read.  On
+    // `FormPartEnd` it is the part's length.
     bytes_so_far: Int
-    // Whether the part is a file: it carried a `filename` parameter.
-    // A file with an empty filename is still a file — a browser sends
-    // one for a file input the user left alone — so this is the flag
-    // and `filename` is the value.
+    // Whether the part carried a `filename` parameter, empty or not.
+    // A browser sends one with an empty filename for a file input left
+    // empty.
     is_file: Bool
 
 // One thing that came out of a reader.
-//
-// The whole interface.  See the module header for why the body arrives
-// as a range rather than as bytes.
 pub enum FormEvent
-    // A part's headers are complete.  Everything a handler needs to
-    // decide what to do with the body that follows, and nothing of the
-    // body itself.
+    // A part's header section is complete.
     FormPartStart(info: FormPartInfo)
-    // Some of a part's body: bytes `[start, end)` of the chunk the
-    // caller JUST FED.  Not a whole part and not a whole anything —
-    // the reader hands over what it has, and the number of these events
-    // for a given part is an artefact of how the host read its socket.
-    // A caller that treated one as one application value has written a
-    // bug that works on localhost.
+    // Bytes `[start, end)` of the step's `data` are part of the current
+    // part's body.  How many of these a part produces depends on how
+    // its bytes were fed, not on the part.
     FormBodyChunk(start: Int, end: Int)
     // The part ended.  `info.bytes_so_far` is its length.
     FormPartEnd(info: FormPartInfo)
-    // The closing boundary was seen.  After this the reader answers no
-    // more events, and anything that follows in the stream is the
-    // epilogue RFC 2046 § 5.1.1 says a reader discards.
+    // The closing delimiter was read.  What follows it is the epilogue,
+    // which RFC 2046 section 5.1.1 has a reader ignore.
     FormBodyEnd
 
-// A reader and the one event that came out of it, if one did.
-//
-// A struct rather than a tuple because the two halves are used at
-// different places: the caller reassigns one and dispatches on the
-// other.  http-codec-nv's `H1Step` is the same shape for the same
-// reason.
+// A reader, the one event that came out of it if one did, and the bytes
+// the event's ranges index.
 pub struct FormStep
     reader: FormReader
-    // `None` means "no complete event in what I have been given yet",
-    // which on a socket is the ordinary case and not a fault.
     event: ?FormEvent
+    data: Bytes
 
-// A reader and every event a drain produced.
+// A reader, every event a drain produced, and the bytes their ranges
+// index.
 pub struct FormDrained
     reader: FormReader
     events: [FormEvent]
+    data: Bytes
 
-// The state between "some bytes turned up" and "here is an event".
+// A reader between chunks.
 //
-// The fields are here because a struct needs them; `phase`,
-// `part_index` and `total_bytes` are the three a caller has business
-// reading, and the predicates below are how.  `pending` holds at most
-// `boundary length + 4` bytes — the longest prefix of a boundary that
-// could straddle two chunks — which is the only buffer in this package
-// and the only one whose size the client does not choose.
+// A caller reads it through `phase_of`, `part_count`, `total_bytes`,
+// `is_complete` and `pending_bytes`.
 pub struct FormReader
     boundary: Str
     limits: FormLimits
     phase: FormPhase
+    // How many parts have started.
     part_index: Int
+    // How many bytes have been fed.
     total_bytes: Int
-    pending: Bytes
+    // The bytes held back, then the chunk last fed.
+    data: Bytes
+    // The offset in `data` of the first byte not yet read.
+    pos: Int
+    // The offset in the whole body of `data`'s first byte.
+    base: Int
+    // Whether the reader is just past a delimiter and has not yet read
+    // the rest of its line.
+    after_delim: Bool
+    // The current part.
+    info: FormPartInfo
+    // The header fields of the part that has just started.
+    headers: [FormHeaderField]
 
 // ── Starting ─────────────────────────────────────────────────────────
 
-// Limits a public upload endpoint can live with: 8 MiB per part, 32 MiB
-// per body, 64 parts, 16 KiB of headers per part, 32 fields, 256-byte
-// names.
-//
-// The numbers are the order nginx's `client_max_body_size` and the
-// common framework defaults sit at.  A caller with a different threat
-// model writes its own, which is why they are a value.
+// Limits for a public upload endpoint: 8 MiB per part, 32 MiB per body,
+// 64 parts, 16 KiB of headers and 32 header fields per part, and
+// 256-byte field names.
 //
 // ```novo
 // use formpart
@@ -201,38 +154,30 @@ pub struct FormReader
 //     println("${formpart.default_limits().max_parts}")
 // ```
 pub fn default_limits() -> FormLimits []
-    todo("form-nv.formpart.default_limits")
+    FormLimits { max_part_bytes: 8388608, max_total_bytes: 33554432, max_parts: 64,
+                 max_headers_bytes: 16384, max_headers: 32, max_name_bytes: 256 }
 
 // Limits for a form with no file inputs: 64 KiB per part and per body,
-// 32 parts.
-//
-// Named because "this endpoint takes no files" is a decision worth
-// being able to state, and because a settings form behind
-// `default_limits()` is an endpoint that will accept 32 MiB.
+// and 32 parts, with `default_limits()`'s header and name bounds.
 pub fn small_form_limits() -> FormLimits []
-    todo("form-nv.formpart.small_form_limits")
+    FormLimits { max_part_bytes: 65536, max_total_bytes: 65536, max_parts: 32,
+                 max_headers_bytes: 16384, max_headers: 32, max_name_bytes: 256 }
 
 // A reader for a boundary.
 //
-// The boundary WITHOUT the leading `--`: RFC 2046 § 5.1.1's parameter
-// is the boundary, and the delimiter is `--` plus it, and a caller that
-// passed the delimiter would have a parser looking for `----`.
+// The boundary is the parameter's value, without the leading `--` the
+// delimiter adds (RFC 2046 section 5.1.1).
 pub fn reader(boundary: Str, limits: FormLimits) -> FormReader []
-    todo("form-nv.formpart.reader")
+    FormReader { boundary: boundary, limits: limits, phase: FormPreamble, part_index: 0,
+                 total_bytes: 0, data: bytes.zeros(0), pos: 0, base: 0, after_delim: false,
+                 info: no_part(), headers: [] }
 
 // The boundary out of a `Content-Type` header value.
 //
-// THE WHOLE OF THE mime-nv DEPENDENCY, in one function, so that a
-// caller who already has the boundary never touches the package.
-// Parsing that header is RFC 2045's token and quoted-string grammar
-// rather than a split on `;`, and the quoted form is the one a boundary
-// containing a `:` or a space has to take.
-//
-// Answers `FormNoBoundary` for a header that names no boundary, and
-// `FormNotMultipart` for one whose type is not `multipart/form-data` —
-// two refusals rather than one, because the first is a client that
-// sent a malformed header and the second is a client that sent the
-// wrong endpoint.
+// A value that is not a `multipart/form-data` media type is
+// `FormNotMultipart`.  One with no `boundary` parameter, or one that
+// `boundary_ok` refuses, is `FormNoBoundary`.  The header is parsed by
+// mime-nv, so a quoted boundary is unquoted.
 //
 // ```novo
 // use formpart
@@ -243,39 +188,42 @@ pub fn reader(boundary: Str, limits: FormLimits) -> FormReader []
 //         Err(_) => println("no boundary")
 // ```
 pub fn boundary_of(content_type: Str) -> Result<Str, formerr.FormError> []
-    todo("form-nv.formpart.boundary_of")
+    match mimetype.parse(content_type)
+        Ok(m)  => boundary_of_type(content_type, m)
+        Err(_) => Err(FormNotMultipart(content_type))
 
-// The boundary out of a `Content-Type` a caller has already parsed.
+// The boundary out of a `Content-Type` a caller has already parsed with
+// mime-nv.  `input` is the header value the `MimeType`'s spans index.
 //
-// The call under `boundary_of`, published because a server parses its
-// request's `Content-Type` once — for the charset, for the sniffing
-// decision, for the route — and asking this package to parse it a
-// second time is a second grammar over the same bytes.  `input` is the
-// header value the `MimeType`'s spans point into, which is mime-nv's
-// own convention.
-//
-// The same two refusals as `boundary_of`, for the same reasons: a type
-// that is not `multipart/form-data` is a client at the wrong endpoint,
-// and a missing boundary is a malformed header.
+// The refusals are `boundary_of`'s.
 pub fn boundary_of_type(input: Str, m: mimetype.MimeType) -> Result<Str, formerr.FormError> []
-    todo("form-nv.formpart.boundary_of_type")
+    if not mimetype.essence_eq(input, m, "multipart/form-data")
+        return Err(FormNotMultipart(mimetype.essence(input, m)))
+    let b = mimetype.boundary(input, m)
+    if not boundary_ok(b)
+        return Err(FormNoBoundary(input))
+    Ok(b)
 
-// Whether a string is a boundary RFC 2046 admits: 1 to 70 bytes from
-// its own restricted set, not ending in a space.
-//
-// A check a SERVER generating a boundary for a response runs, and one a
-// server receiving one runs before it starts scanning for something
-// that cannot appear.
+// Whether a string is a boundary RFC 2046 section 5.1.1 admits: 1 to 70
+// bytes, each an ASCII letter or digit or one of `'()+_,-./:=?` and the
+// space, and not ending in a space.
 pub fn boundary_ok(boundary: Str) -> Bool []
-    todo("form-nv.formpart.boundary_ok")
+    let n = str.len(boundary)
+    if n < 1 or n > 70 or str.byte_at_or(boundary, n - 1, 0) == ' '
+        return false
+    for i in 0..n
+        if not bchar(str.byte_at_or(boundary, i, 0))
+            return false
+    true
 
 // ── Feeding and draining ─────────────────────────────────────────────
 
-// Feed a chunk and take the first event it completed.
+// Feed a chunk and take the first event it completes.
 //
-// The ranges in a `FormBodyChunk` are into THIS chunk.  Call `take`
-// until it answers `None` before feeding the next one, or use `drain`,
-// which does that loop.
+// Call `take` until it answers no event before feeding the next chunk,
+// or use `drain`, which does that.  A chunk that takes the body past
+// `max_total_bytes` is refused before any of it is read.  A chunk fed
+// after the closing delimiter is epilogue and is counted and ignored.
 //
 // ```novo
 // use formpart
@@ -285,143 +233,475 @@ pub fn boundary_ok(boundary: Str) -> Bool []
 //     println("${formpart.phase_of(r) == FormPreamble}")
 // ```
 pub fn feed(r: FormReader, chunk: Bytes) -> Result<FormStep, formerr.FormError> []
-    todo("form-nv.formpart.feed")
+    let total = r.total_bytes + bytes.len(chunk)
+    if total > r.limits.max_total_bytes
+        return Err(FormBodyTooLarge(r.limits.max_total_bytes))
+    let held = bytes.slice(r.data, r.pos, bytes.len(r.data))
+    let data = if bytes.len(held) == 0
+        chunk
+    else
+        held + chunk
+    var pos = 0
+    if is_done(r.phase)
+        pos = bytes.len(data)
+    let next = FormReader { boundary: r.boundary, limits: r.limits, phase: r.phase,
+                            part_index: r.part_index, total_bytes: total, data: data,
+                            pos: pos, base: r.base + r.pos, after_delim: r.after_delim,
+                            info: r.info, headers: r.headers }
+    take(next)
 
-// Take the next event out of what has already been fed.
-//
-// `event: None` means "no complete event yet", which is the ordinary
-// case on a socket.
+// Take the next event out of what has been fed.
 pub fn take(r: FormReader) -> Result<FormStep, formerr.FormError> []
-    todo("form-nv.formpart.take")
+    let a = advance(r)!
+    if a.event != None or a.stalled
+        return Ok(FormStep { reader: a.reader, event: a.event, data: a.reader.data })
+    take(a.reader)
 
-// Feed a chunk and take every event it completed.
-//
-// The convenience over `feed` and `take`, for a caller whose loop is
-// already per chunk.  The ranges are into the chunk that was fed.
+// Feed a chunk and take every event it completes.
 pub fn drain(r: FormReader, chunk: Bytes) -> Result<FormDrained, formerr.FormError> []
-    todo("form-nv.formpart.drain")
+    var step = feed(r, chunk)!
+    var events: [FormEvent] = []
+    for _ in 0..bytes.len(step.data) + 8
+        match step.event
+            Some(e) => list.push(events, e)
+            None    =>
+                break
+        step = take(step.reader)!
+    Ok(FormDrained { reader: step.reader, events: events, data: step.data })
 
 // Tell the reader the stream has ended.
 //
-// A body that ended before its closing boundary is `FormTruncated`,
-// which is a different thing from a body that ended cleanly and is the
-// difference between "the upload failed" and "the upload is complete".
-// A caller that never calls this has a truncated upload it treats as a
-// whole one.
+// A body that ended before its closing delimiter is `FormTruncated`,
+// which is how a failed upload is told from a complete one.
 pub fn finish(r: FormReader) -> Result<FormDrained, formerr.FormError> []
-    todo("form-nv.formpart.finish")
+    if not is_done(r.phase)
+        return Err(FormTruncated(r.part_index, r.total_bytes))
+    Ok(FormDrained { reader: r, events: [], data: r.data })
 
 // ── Reading a reader ─────────────────────────────────────────────────
 
 // What the reader is looking at.
 pub fn phase_of(r: FormReader) -> FormPhase []
-    todo("form-nv.formpart.phase_of")
+    r.phase
 
 // How many parts have started.
 pub fn part_count(r: FormReader) -> Int []
-    todo("form-nv.formpart.part_count")
+    r.part_index
 
-// How many bytes have been fed in total.
-//
-// What `max_total_bytes` is measured against, readable so a server can
-// report progress and so a test can assert the bound was checked at the
-// byte it says.
+// How many bytes have been fed.
 pub fn total_bytes(r: FormReader) -> Int []
-    todo("form-nv.formpart.total_bytes")
+    r.total_bytes
 
-// Whether the closing boundary has been seen.
+// Whether the closing delimiter has been read.
 pub fn is_complete(r: FormReader) -> Bool []
-    todo("form-nv.formpart.is_complete")
+    is_done(r.phase)
 
-// How many bytes the reader is holding between chunks.
+// How many fed bytes the reader holds that no event has answered.
 //
-// At most the boundary's length plus four, and published so that a
-// caller can assert the reader is not accumulating a part — which is
-// this package's central claim and the one a test should be able to
-// check directly.
+// In a part's body and in the preamble it is at most the boundary's
+// length plus three.  In a header section that is not yet complete it
+// is at most `max_headers_bytes`.
 pub fn pending_bytes(r: FormReader) -> Int []
-    todo("form-nv.formpart.pending_bytes")
+    bytes.len(r.data) - r.pos
 
 // ── Reading a part ───────────────────────────────────────────────────
 
-// A part's `Content-Type`, or `text/plain` when it carried none.
-//
-// RFC 7578 § 4.4's default, as a function rather than as a value
-// written into the field — so a caller that needs to know whether the
-// client SAID `text/plain` still can.
+// A part's `Content-Type`, or `text/plain` when it carried none, which
+// is RFC 7578 section 4.4's default.
 pub fn content_type_or_default(info: FormPartInfo) -> Str []
-    todo("form-nv.formpart.content_type_or_default")
+    if info.content_type == ""
+        return "text/plain"
+    info.content_type
 
-// Whether a filename is one a server may use as a name without
-// checking anything else: no separator, no `..`, no control byte, not
-// empty, not `.`.
+// Whether a filename can be used as a name in a directory without
+// further checks: it is not empty, `.` or `..`, and holds no `/`, no
+// `\` and no control byte.
 //
-// A check and not a repair.  Sanitising a filename means choosing a
-// replacement, and the right replacement differs by filesystem and by
-// whether the name is shown to a person — so this says what is wrong
-// and the server decides.  A client that sends `../../etc/passwd` is a
-// client rather than a mistake, and a library that quietly rewrote it
-// would have hidden an attempt somebody should see in a log.
+// A check and not a repair.  RFC 7578 section 4.2 has a client send a
+// name without a path, and a name that fails this was sent by a client
+// that did not.
 pub fn filename_is_safe(filename: Str) -> Bool []
-    todo("form-nv.formpart.filename_is_safe")
+    if filename == "" or filename == "." or filename == ".."
+        return false
+    for i in 0..str.len(filename)
+        let b = str.byte_at_or(filename, i, 0)
+        if b == '/' or b == '\\' or b < ' ' or b == 127
+            return false
+    true
 
 // The header fields of the part that has just started, as ranges into
-// the chunk that completed its header section.
+// the `data` of the step that answered its `FormPartStart`.
 //
-// Beyond the three `FormPartInfo` decodes: a client may send
-// `Content-Transfer-Encoding`, and a handler that cares reads it here.
-// Empty once the part's body has begun, because the ranges would then
-// name bytes that are no longer the caller's.
+// Empty once any other event has been answered.
 pub fn headers_of(r: FormReader) -> [FormHeaderField] []
-    todo("form-nv.formpart.headers_of")
+    list.clone(r.headers)
 
-// One header field's name, out of the chunk it arrived in.
+// One header field's name, out of the step's `data`.
 pub fn header_name(chunk: Bytes, h: FormHeaderField) -> Str []
-    todo("form-nv.formpart.header_name")
+    bytes.to_str(bytes.slice(chunk, h.name_start, h.name_end))
 
-// One header field's value, out of the chunk it arrived in.
+// One header field's value, out of the step's `data`.
 pub fn header_value(chunk: Bytes, h: FormHeaderField) -> Str []
-    todo("form-nv.formpart.header_value")
+    bytes.to_str(bytes.slice(chunk, h.value_start, h.value_end))
 
-// A header field's value by name, case-insensitively, or the empty
-// string.
+// The value of the part's first header field with a name, compared
+// ignoring ASCII case, or the empty string.
 pub fn header(r: FormReader, chunk: Bytes, name: Str) -> Str []
-    todo("form-nv.formpart.header")
+    let want = str.lower(name)
+    for h in r.headers
+        if str.lower(header_name(chunk, h)) == want
+            return header_value(chunk, h)
+    ""
 
-// ── The convenience that is deliberately bounded ─────────────────────
+// ── Whole parts, bounded ─────────────────────────────────────────────
 
-// Every part of a whole body, with each part's bytes collected.
+// Every part of a whole body, each with its bytes.
 //
-// THE CALL THIS PACKAGE ALMOST DID NOT HAVE, and the bound is why it
-// does.  A caller that genuinely has the whole body in memory — a test,
-// a small settings form, a queued job — wants the parts as values, and
-// writing the accumulation loop by hand at every such call site is how
-// the loop ends up unbounded somewhere.
-//
-// So it is here, it takes the same `FormLimits`, and it refuses exactly
-// what the streaming path refuses.  What it does NOT have is a variant
-// without limits: `collect(body, boundary)` with no bound is the API
-// this module's header argues against, and it is not published.
+// The body is read by a reader with `limits` and finished, so it
+// refuses what the streaming path refuses, and a body with no closing
+// delimiter is `FormTruncated`.  There is no form of this call without
+// limits.
 pub fn collect(body: Bytes, boundary: Str,
                limits: FormLimits) -> Result<[FormCollected], formerr.FormError> []
-    todo("form-nv.formpart.collect")
+    let d = drain(reader(boundary, limits), body)!
+    finish(d.reader)!
+    var out: [FormCollected] = []
+    var pieces: [Bytes] = []
+    for e in d.events
+        match e
+            FormBodyChunk(s, t) => list.push(pieces, bytes.slice(d.data, s, t))
+            FormPartEnd(info)   =>
+                list.push(out, FormCollected { info: info, bytes: bytes.concat(pieces) })
+                pieces = []
+            _                   => ()
+    Ok(out)
 
 // One part, with its bytes.
-//
-// What `collect` answers.  `bytes` is a copy, which is the cost the
-// streaming path exists to avoid and the cost this call exists to
-// charge honestly.
 pub struct FormCollected
     info: FormPartInfo
     bytes: Bytes
 
-// A collected part by field name, or `None`.
+// The first collected part with a field name, or `None`.
 pub fn part_named(parts: [FormCollected], name: Str) -> ?FormCollected []
-    todo("form-nv.formpart.part_named")
+    list.first(parts_named(parts, name))
 
-// Every collected part with a field name, in order.
-//
-// A multipart form can repeat a name the same way an urlencoded one
-// can — a multi-file input sends one part per file, all named the same.
+// Every collected part with a field name, in order.  A multi-file input
+// sends one part per file under one name.
 pub fn parts_named(parts: [FormCollected], name: Str) -> [FormCollected] []
-    todo("form-nv.formpart.parts_named")
+    var out: [FormCollected] = []
+    for p in parts
+        if p.info.name == name
+            list.push(out, p)
+    out
+
+// ── The reader's steps ───────────────────────────────────────────────
+
+// What one step of the reader did: the reader after it, the event it
+// answered if it answered one, and whether it needs more bytes.
+struct Advance
+    reader: FormReader
+    event: ?FormEvent
+    stalled: Bool
+
+// A part with nothing read yet.
+fn no_part() -> FormPartInfo
+    FormPartInfo { name: "", filename: "", content_type: "", bytes_so_far: 0, is_file: false }
+
+// Whether a phase is `FormDone`.
+fn is_done(p: FormPhase) -> Bool
+    match p
+        FormDone => true
+        _        => false
+
+// The reader with a new phase, position, delimiter flag, part count,
+// part and header list.
+fn moved(r: FormReader, phase: FormPhase, pos: Int, after_delim: Bool, part_index: Int,
+         info: FormPartInfo, headers: [FormHeaderField]) -> FormReader
+    FormReader { boundary: r.boundary, limits: r.limits, phase: phase, part_index: part_index,
+                 total_bytes: r.total_bytes, data: r.data, pos: pos, base: r.base,
+                 after_delim: after_delim, info: info, headers: headers }
+
+// The reader at a new position, and nothing else changed.
+fn at(r: FormReader, pos: Int) -> FormReader
+    moved(r, r.phase, pos, r.after_delim, r.part_index, r.info, r.headers)
+
+// A step that needs more bytes.
+fn stall(r: FormReader) -> Result<Advance, formerr.FormError>
+    Ok(Advance { reader: r, event: None, stalled: true })
+
+// A step that read something and answered nothing.
+fn went(r: FormReader) -> Result<Advance, formerr.FormError>
+    Ok(Advance { reader: r, event: None, stalled: false })
+
+// A step that answered an event.
+fn answered(r: FormReader, e: FormEvent) -> Result<Advance, formerr.FormError>
+    Ok(Advance { reader: r, event: Some(e), stalled: false })
+
+// One step of the reader.
+fn advance(r: FormReader) -> Result<Advance, formerr.FormError>
+    match r.phase
+        FormPreamble  => preamble(r)
+        FormHeaders   =>
+            if r.after_delim
+                return delimiter_line(r)
+            header_section(r)
+        FormBodyPhase => body(r)
+        FormDone      => stall(r)
+
+// The delimiter: a line break, `--` and the boundary.
+fn delimiter(r: FormReader) -> Bytes
+    bytes.from_str("\r\n--" + r.boundary)
+
+// Before the first delimiter.  The body may begin with the delimiter's
+// `--` and boundary directly, with no line break before them.
+fn preamble(r: FormReader) -> Result<Advance, formerr.FormError>
+    let first = bytes.from_str("--" + r.boundary)
+    let n = bytes.len(r.data)
+    if r.base + r.pos == 0
+        if starts_with_at(r.data, 0, first)
+            return went(moved(r, FormHeaders, bytes.len(first), true, r.part_index, r.info, r.headers))
+        if n < bytes.len(first) and starts_with_at(first, 0, r.data)
+            return stall(r)
+    let d = delimiter(r)
+    match bytes.find(r.data, d, r.pos)
+        Some(k) => went(moved(r, FormHeaders, k + bytes.len(d), true, r.part_index, r.info, r.headers))
+        None    => stall(at(r, tail_hold(r.data, r.pos, d)))
+
+// The rest of a delimiter's line: `--` for the closing delimiter, or
+// optional spaces and tabs and a line break before a part's headers.
+fn delimiter_line(r: FormReader) -> Result<Advance, formerr.FormError>
+    let n = bytes.len(r.data)
+    if r.pos + 2 > n
+        return stall(r)
+    if byte(r.data, r.pos) == '-' and byte(r.data, r.pos + 1) == '-'
+        return answered(moved(r, FormDone, n, false, r.part_index, r.info, []), FormBodyEnd)
+    var j = r.pos
+    for _ in r.pos..n
+        let b = byte(r.data, j)
+        if b != ' ' and b != '\t'
+            break
+        j = j + 1
+    if j + 2 > n
+        return stall(r)
+    if byte(r.data, j) != '\r' or byte(r.data, j + 1) != '\n'
+        return Err(FormBadHeader(r.part_index, r.base + j))
+    if r.part_index >= r.limits.max_parts
+        return Err(FormTooManyParts(r.limits.max_parts))
+    went(moved(r, FormHeaders, j + 2, false, r.part_index + 1, no_part(), []))
+
+// A part's header section, ending at an empty line.
+fn header_section(r: FormReader) -> Result<Advance, formerr.FormError>
+    let hs = r.pos
+    let n = bytes.len(r.data)
+    var he = hs
+    var body_at = hs + 2
+    if not starts_with_at(r.data, hs, bytes.from_str("\r\n"))
+        match bytes.find(r.data, bytes.from_str("\r\n\r\n"), hs)
+            Some(k) =>
+                he = k
+                body_at = k + 4
+            None    =>
+                if n - hs > r.limits.max_headers_bytes
+                    return Err(FormHeadersTooLarge(r.part_index, r.limits.max_headers_bytes))
+                return stall(r)
+    if he - hs > r.limits.max_headers_bytes
+        return Err(FormHeadersTooLarge(r.part_index, r.limits.max_headers_bytes))
+    let fields = header_fields(r, hs, he)!
+    let info = part_info(r, fields)!
+    answered(moved(r, FormBodyPhase, body_at, false, r.part_index, info, fields), FormPartStart(info))
+
+// The header fields in `[hs, he)`, one per line.
+fn header_fields(r: FormReader, hs: Int, he: Int) -> Result<[FormHeaderField], formerr.FormError>
+    var out: [FormHeaderField] = []
+    var ls = hs
+    for _ in hs..he + 1
+        if ls >= he
+            break
+        let le = bytes.find(r.data, bytes.from_str("\r\n"), ls) ?? he
+        let end = if le < he
+            le
+        else
+            he
+        let colon = bytes.find(r.data, bytes.from_str(":"), ls) ?? end
+        if colon >= end or colon == ls or not token_run(r.data, ls, colon)
+            return Err(FormBadHeader(r.part_index, r.base + ls))
+        if list.len(out) >= r.limits.max_headers
+            return Err(FormTooManyHeaders(r.part_index, r.limits.max_headers))
+        let v0 = skip_ows(r.data, colon + 1, end)
+        let v1 = trim_ows_end(r.data, v0, end)
+        list.push(out, FormHeaderField { name_start: ls, name_end: colon, value_start: v0, value_end: v1 })
+        ls = end + 2
+    Ok(out)
+
+// The part a header section describes.
+fn part_info(r: FormReader, fields: [FormHeaderField]) -> Result<FormPartInfo, formerr.FormError>
+    let disp = field_value(r.data, fields, "content-disposition")
+    if disp == None
+        return Err(FormNoDisposition(r.part_index))
+    let d = disp ?? ""
+    let semi = str.index(d, ";") ?? str.len(d)
+    if str.lower(str.trim(str.slice(d, 0, semi))) != "form-data"
+        return Err(FormNoDisposition(r.part_index))
+    let params = disposition_params(str.slice(d, semi, str.len(d)))
+    let name = param(params, "name")
+    if name == None
+        return Err(FormNoFieldName(r.part_index))
+    let n = name ?? ""
+    if str.len(n) > r.limits.max_name_bytes
+        return Err(FormNameTooLong(r.part_index, r.limits.max_name_bytes))
+    let filename = param(params, "filename")
+    Ok(FormPartInfo { name: n, filename: filename ?? "",
+                      content_type: field_value(r.data, fields, "content-type") ?? "",
+                      bytes_so_far: 0, is_file: filename != None })
+
+// A part's body, up to the next delimiter.
+fn body(r: FormReader) -> Result<Advance, formerr.FormError>
+    let d = delimiter(r)
+    match bytes.find(r.data, d, r.pos)
+        Some(k) =>
+            if k > r.pos
+                return chunk(r, k)
+            let ended = r.info
+            answered(moved(r, FormHeaders, k + bytes.len(d), true, r.part_index, ended, []),
+                     FormPartEnd(ended))
+        None    =>
+            let hold = tail_hold(r.data, r.pos, d)
+            if hold > r.pos
+                return chunk(r, hold)
+            stall(r)
+
+// The body bytes from the reader's position to `end`, as an event.
+fn chunk(r: FormReader, end: Int) -> Result<Advance, formerr.FormError>
+    let so_far = r.info.bytes_so_far + end - r.pos
+    if so_far > r.limits.max_part_bytes
+        return Err(FormPartTooLarge(r.part_index, r.info.name, r.limits.max_part_bytes))
+    let info = FormPartInfo { name: r.info.name, filename: r.info.filename,
+                              content_type: r.info.content_type, bytes_so_far: so_far,
+                              is_file: r.info.is_file }
+    answered(moved(r, FormBodyPhase, end, false, r.part_index, info, []), FormBodyChunk(r.pos, end))
+
+// The first offset at or after `from` whose bytes to the end could be
+// the start of the delimiter `d`, or the end of `data`.  Everything
+// before it is not part of a delimiter.
+fn tail_hold(data: Bytes, from: Int, d: Bytes) -> Int
+    let n = bytes.len(data)
+    var i = n - bytes.len(d) + 1
+    if i < from
+        i = from
+    for _ in i..n
+        if starts_with_at(d, 0, bytes.slice(data, i, n))
+            return i
+        i = i + 1
+    n
+
+// Whether `data` holds `probe` at offset `at`.
+fn starts_with_at(data: Bytes, at: Int, probe: Bytes) -> Bool
+    let m = bytes.len(probe)
+    if at + m > bytes.len(data)
+        return false
+    for i in 0..m
+        if byte(data, at + i) != byte(probe, i)
+            return false
+    true
+
+// The byte at `i`, or -1 past the end.
+fn byte(b: Bytes, i: Int) -> Int
+    bytes.byte_at(b, i) ?? 0 - 1
+
+// Whether `[from, to)` holds only token bytes (RFC 9110 section 5.6.2).
+fn token_run(b: Bytes, from: Int, to: Int) -> Bool
+    for i in from..to
+        let c = byte(b, i)
+        if c <= ' ' or c >= 127 or str.contains("()<>@,;:\\\"/[]?={}", str.from_byte(c))
+            return false
+    true
+
+// The first offset in `[from, to)` that is not a space or a tab.
+fn skip_ows(b: Bytes, from: Int, to: Int) -> Int
+    for i in from..to
+        let c = byte(b, i)
+        if c != ' ' and c != '\t'
+            return i
+    to
+
+// The offset just past the last byte in `[from, to)` that is not a
+// space or a tab.
+fn trim_ows_end(b: Bytes, from: Int, to: Int) -> Int
+    var k = to
+    for _ in from..to
+        let c = byte(b, k - 1)
+        if c != ' ' and c != '\t'
+            break
+        k = k - 1
+    k
+
+// The value of the first field with a name, compared ignoring case.
+fn field_value(data: Bytes, fields: [FormHeaderField], name: Str) -> ?Str
+    for h in fields
+        if str.lower(header_name(data, h)) == name
+            return Some(header_value(data, h))
+    None
+
+// The parameters after a disposition's type, `; name=value` each, with
+// names lowercased and quoted values unquoted.
+fn disposition_params(s: Str) -> [(Str, Str)]
+    var out: [(Str, Str)] = []
+    let n = str.len(s)
+    var i = 0
+    for _ in 0..n + 1
+        if i >= n
+            break
+        if str.byte_at_or(s, i, 0) == ';'
+            i = i + 1
+            continue
+        let eq = str.index_from(s, "=", i) ?? n
+        let semi = str.index_from(s, ";", i) ?? n
+        if semi < eq
+            i = semi
+            continue
+        let key = str.lower(str.trim(str.slice(s, i, eq)))
+        var v = eq + 1
+        for _ in eq + 1..n
+            let c = str.byte_at_or(s, v, 0)
+            if c != ' ' and c != '\t'
+                break
+            v = v + 1
+        if str.byte_at_or(s, v, 0) == '"'
+            let q = quoted(s, v)
+            list.push(out, (key, q.0))
+            i = q.1
+        else
+            let end = str.index_from(s, ";", v) ?? n
+            list.push(out, (key, str.trim(str.slice(s, v, end))))
+            i = end
+    out
+
+// The quoted string opening at `open`, unescaped, and the offset after
+// it.  An unclosed string runs to the end.
+fn quoted(s: Str, open: Int) -> (Str, Int)
+    var out: [Int] = []
+    let n = str.len(s)
+    var i = open + 1
+    for _ in open + 1..n
+        if i >= n
+            break
+        let c = str.byte_at_or(s, i, 0)
+        if c == '"'
+            return (bytes.byte_list_to_str(out), i + 1)
+        if c == '\\' and i + 1 < n
+            i = i + 1
+        list.push(out, str.byte_at_or(s, i, 0))
+        i = i + 1
+    (bytes.byte_list_to_str(out), n)
+
+// The value of a parameter, or `None`.
+fn param(params: [(Str, Str)], name: Str) -> ?Str
+    for p in params
+        if p.0 == name
+            return Some(p.1)
+    None
+
+// Whether a byte may stand in a boundary (RFC 2046 section 5.1.1,
+// `bchars`).
+fn bchar(b: Int) -> Bool
+    b >= 'a' and b <= 'z' or b >= 'A' and b <= 'Z' or b >= '0' and b <= '9' or str.contains("'()+_,-./:=? ", str.from_byte(b))

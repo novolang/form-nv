@@ -1,79 +1,65 @@
 // formurl.nv — `application/x-www-form-urlencoded`, to the WHATWG
 // rules.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// The parser and serialiser are the WHATWG URL Standard's (section
+// 5.1 and section 5.2), which is what a browser writes when it submits
+// a form.  The parse is the walk of `formscan` fed from a `Bytes`.
 //
-// AN ORDERED PAIR LIST, NOT A MAP.  `tag=a&tag=b` is two tags, and a
-// map would have had to pick one — which is exactly what a checkbox
-// group, a multi-select and a repeated query parameter all send.  So
-// the parse answers a list, `get` answers the FIRST value and
-// `get_all` answers every one, and the order is the body's own because
-// a server that reorders a form has changed what the client said.
+// A body parses into an ordered list of pairs.  `tag=a&tag=b` is two
+// pairs, because a checkbox group and a multi-select send one field per
+// ticked option.  `get` answers the first value of a name and `get_all`
+// answers every one, in the body's order.
 //
-// EVERY PAIR IS A PAIR OF SPANS into the caller's own bytes.  Nothing
-// is copied until somebody asks: `key_str` and `value_str` decode one
-// field, and a handler that looks at three of a hundred fields pays for
-// three.  `FormPair` holds four integers and no string at all.
+// A pair is two spans, byte ranges into the body, and a flag.  Nothing
+// is decoded until a caller asks: `key_str` and `value_str` decode one
+// field, so a handler that reads three fields of a hundred decodes
+// three.
 //
-// WHICH RULES, EXACTLY.  The WHATWG URL Standard's
-// `application/x-www-form-urlencoded` parser and serialiser, which is
-// what a browser implements and therefore what a server receives.  It
-// is NOT urllib's, and § The overlap with url-nv in the README lists
-// the four places the two disagree.  The one worth repeating here: the
-// WHATWG parser has no `keep_blank_values` knob — a field with no value
-// is a key with an empty value, always — because a browser sends one
-// for a text input the user left alone, and a parser that dropped it
-// would make "the user cleared this field" indistinguishable from "the
-// field was not on the form".
+// A field with no value is present with an empty value.  `name=` and a
+// bare `name` both answer `Some("")`.  A text input left empty sends
+// one, and dropping it would make an emptied field look like a field
+// that was not on the form.
+//
+// Decoded bytes are not checked as UTF-8.  The standard replaces an
+// invalid sequence with U+FFFD, and this package answers the bytes as
+// they were sent; `value_bytes` answers them without the `Str`'s stop
+// at a zero byte.
 
+use std.bytes
+use std.list
+use std.str
 use formscan
 use formerr
 
 // A byte range into the body: `[start, end)`.
-//
-// Half-open, because that is the only convention under which an empty
-// range at a position is expressible — which is what a key with no
-// value has.
 pub struct FormSpan
     start: Int
     end: Int
 
-// One `key=value` of a body, as spans into it.
-//
-// Four integers.  The strings are `key_str` and `value_str`, and they
-// are calls rather than fields because decoding is what allocates.
+// One `name=value` of a body, as spans into it.
 pub struct FormPair
     key: FormSpan
     value: FormSpan
-    // Whether the field carried an `=` at all.  A bare `key` is a key
-    // with an empty value under the standard, and this is how a caller
-    // that wants to tell the two apart can.
+    // Whether the field carried an `=`.  A bare `name` has an empty
+    // value under the standard, and this tells it from `name=`.
     had_assigner: Bool
 
 // A parsed body: the bytes, and the pairs over them.
-//
-// The bytes are held so that `key_str` and `value_str` need only the
-// body, and so that a handler can carry one value through its own
-// request scope without carrying the caller's buffer beside it.
 pub struct FormBody
     bytes: Bytes
     pairs: [FormPair]
-    // Whether any field carried a `%` that began no valid escape.  The
-    // standard KEEPS such a byte and carries on, which is what this
-    // does; the flag is how a caller stricter than the standard finds
-    // out.
+    // Whether any field held a `%` that began no valid escape.  The
+    // standard keeps such a `%` as it is, and so does the parse.
     had_bad_escape: Bool
 
 // ── Parsing ──────────────────────────────────────────────────────────
 
 // Read a body.
 //
-// Cannot fail, and that is the standard's decision rather than this
-// package's: the WHATWG parser has no error case at all.  An empty
-// body is an empty list, a `%` that begins no escape is a literal `%`,
-// a field with no `=` is a key with an empty value, and a field that is
-// entirely empty (`a=1&&b=2`) is skipped.  A caller that wants to
-// refuse any of those asks `had_bad_escape` or counts the pairs.
+// The standard's parser has no error case, and neither does this.  An
+// empty body has no pairs, a `%` that begins no escape is a literal
+// `%`, a field with no `=` is a name with an empty value, and an empty
+// field (`a=1&&b=2`) is skipped.
 //
 // ```novo
 // use formurl
@@ -85,99 +71,100 @@ pub struct FormBody
 //     println("${list.len(b.pairs)}")
 // ```
 pub fn parse(body: Bytes) -> FormBody []
-    todo("form-nv.formurl.parse")
+    walk(body, bytes.len(body) + 1) ?? FormBody { bytes: body, pairs: [], had_bad_escape: false }
 
-// Read a body out of a string.
-//
-// The same call for a caller that has a query string rather than a
-// request body — which is the other place this encoding turns up, and
-// the reason `parse` does not insist on `Bytes`.
+// Read a body held in a string, such as a URL's query.
 pub fn parse_str(body: Str) -> FormBody []
-    todo("form-nv.formurl.parse_str")
+    parse(bytes.from_str(body))
 
-// Read a body, refusing one with more than `max_pairs` fields.
+// Read a body, refusing one with more than `max_pairs` fields with
+// `FormTooManyPairs`.
 //
-// The bound a server puts on a request it did not write.  A form with
-// ten thousand fields is not a form; it is one packet and a list
-// allocation per field, and the refusal is what turns that from a
-// memory decision the client makes into one the server made.
+// The walk stops at the field that passes the bound.
 pub fn parse_bounded(body: Bytes, max_pairs: Int) -> Result<FormBody, formerr.FormError> []
-    todo("form-nv.formurl.parse_bounded")
+    match walk(body, max_pairs)
+        Some(b) => Ok(b)
+        None    => Err(FormTooManyPairs(max_pairs))
 
 // ── Reading ──────────────────────────────────────────────────────────
 
-// The first value carried by a key, decoded, or `None`.
-//
-// FIRST and not last: a body is read left to right, and the first
-// occurrence is the one a form's own reader sees.  A caller that needs
-// the others has `get_all`.
+// The first value of a name, decoded, or `None`.
 pub fn get(b: FormBody, key: Str) -> ?Str []
-    todo("form-nv.formurl.get")
+    for p in b.pairs
+        if key_str(b, p) == key
+            return Some(value_str(b, p))
+    None
 
-// Every value carried by a key, decoded, in the order they were
-// written.
-//
-// The reason `parse` answers a list and not a map.
+// Every value of a name, decoded, in the body's order.
 pub fn get_all(b: FormBody, key: Str) -> [Str] []
-    todo("form-nv.formurl.get_all")
+    var out: [Str] = []
+    for p in b.pairs
+        if key_str(b, p) == key
+            list.push(out, value_str(b, p))
+    out
 
-// Whether a key is present at all.
+// Whether a name is present at all.
 //
-// Distinct from `get(b, k) == Some("")`: a checkbox that was not
-// ticked is absent, and one that was ticked with no value is present
-// and empty.
+// A checkbox that was not ticked is absent; one ticked with an empty
+// value is present.
 pub fn has(b: FormBody, key: Str) -> Bool []
-    todo("form-nv.formurl.has")
+    count(b, key) > 0
 
-// How many fields carry a key.
+// How many fields carry a name.
 pub fn count(b: FormBody, key: Str) -> Int []
-    todo("form-nv.formurl.count")
+    var n = 0
+    for p in b.pairs
+        if key_str(b, p) == key
+            n = n + 1
+    n
 
-// Every key in the body, each once, in the order first seen.
-//
-// What a handler listing what it was sent walks, and what a check for
-// unexpected fields compares against its own list.
+// Every name in the body, each once, in the order first seen.
 pub fn keys(b: FormBody) -> [Str] []
-    todo("form-nv.formurl.keys")
+    var out: [Str] = []
+    for p in b.pairs
+        let k = key_str(b, p)
+        if not list.contains(out, k)
+            list.push(out, k)
+    out
 
-// One pair's key, decoded.
+// One pair's name, decoded.
 pub fn key_str(b: FormBody, p: FormPair) -> Str []
-    todo("form-nv.formurl.key_str")
+    bytes.to_str(decode_span(b.bytes, p.key))
 
 // One pair's value, decoded.
 pub fn value_str(b: FormBody, p: FormPair) -> Str []
-    todo("form-nv.formurl.value_str")
+    bytes.to_str(decode_span(b.bytes, p.value))
 
 // One pair's value as bytes, decoded.
 //
-// A form field is not necessarily text: a hidden field can carry
-// base64, and a client that percent-encoded arbitrary bytes into one is
-// within the standard.  Decoding to `Str` would make that field
-// unreadable without saying so.
+// A field may carry any bytes, a zero byte included, which a `Str`
+// cannot hold.
 pub fn value_bytes(b: FormBody, p: FormPair) -> Bytes []
-    todo("form-nv.formurl.value_bytes")
+    decode_span(b.bytes, p.value)
 
-// The span a key occupies in the body, for a caller that wants the
-// position rather than the text.
+// The encoded bytes a span covers, as a new buffer.
 pub fn span_bytes(b: FormBody, s: FormSpan) -> Bytes []
-    todo("form-nv.formurl.span_bytes")
+    bytes.slice(b.bytes, s.start, s.end)
 
-// How many bytes a span's DECODED form is.
-//
-// Answered by walking rather than by decoding, so a caller checking a
-// field against a size limit does not allocate to find out it is too
-// big.
+// How many bytes a span decodes to, counted without decoding.
 pub fn decoded_len(b: FormBody, s: FormSpan) -> Int []
-    todo("form-nv.formurl.decoded_len")
+    var n = 0
+    var i = s.start
+    for _ in s.start..s.end
+        if i >= s.end
+            break
+        i = i + escape_width(b.bytes, i, s.end)
+        n = n + 1
+    n
 
 // ── Writing ──────────────────────────────────────────────────────────
 
-// Pairs written back out, to the WHATWG serialiser.
+// Pairs written out by the WHATWG serialiser: `name=value`, joined with
+// `&`.
 //
-// A space becomes `+`, a safe byte stays, everything else becomes
-// `%XX` in UPPER CASE, and the safe set is the standard's — letters,
-// digits, `*`, `-`, `.`, `_`, and NOT `~`.  Round-trips with `parse`
-// for any pair list.
+// A space becomes `+`, a byte `formscan.byte_safe` admits stays, and
+// every other byte becomes `%XX` in upper case.  `parse` reads the
+// answer back into the same pairs.
 //
 // ```novo
 // use formurl
@@ -186,47 +173,161 @@ pub fn decoded_len(b: FormBody, s: FormSpan) -> Int []
 //     println(formurl.serialise([("q", "a b"), ("n", "1&2")]))
 // ```
 pub fn serialise(pairs: [(Str, Str)]) -> Str []
-    todo("form-nv.formurl.serialise")
+    var out: [Str] = []
+    for p in pairs
+        list.push(out, encode(p.0) + "=" + encode(p.1))
+    str.join(out, "&")
 
-// Pairs written into a buffer the caller sized.
+// Pairs serialised into a buffer the caller sized, starting at `off`,
+// answering the buffer.
 //
-// Appends at `off` and answers the buffer; `serialised_len` is how big
-// it needs to be.  The shape for a caller building a request body
-// without an allocation per field.
-pub fn serialise_into(out: Bytes, off: Int, pairs: [(Str, Str)]) -> Bytes []
-    todo("form-nv.formurl.serialise_into")
+// `serialised_len` is the number of bytes written.  A buffer too short
+// panics at the first byte past its end, as every `Bytes` writer does.
+pub fn serialise_into(var out: Bytes, off: Int, pairs: [(Str, Str)]) -> Bytes []
+    var at = off
+    var first = true
+    for p in pairs
+        if not first
+            bytes.set_u8(out, at, '&')
+            at = at + 1
+        first = false
+        at = encode_into(out, at, p.0)
+        bytes.set_u8(out, at, '=')
+        at = encode_into(out, at + 1, p.1)
+    out
 
-// How many bytes `serialise` would produce.
+// How many bytes `serialise` writes.
 pub fn serialised_len(pairs: [(Str, Str)]) -> Int []
-    todo("form-nv.formurl.serialised_len")
+    var n = 0
+    for p in pairs
+        n = n + encoded_size(p.0) + 1 + encoded_size(p.1)
+    if list.len(pairs) > 1
+        n = n + list.len(pairs) - 1
+    n
 
-// One string percent-encoded under the form rules.
-//
-// Published because a caller building a URL's query by hand wants
-// exactly it, and because a second copy of the safe set is a second
-// place for it to be wrong.
+// One string encoded under the form rules.
 pub fn encode(value: Str) -> Str []
-    todo("form-nv.formurl.encode")
+    var out: [Int] = []
+    for i in 0..str.len(value)
+        let b = str.byte_at_or(value, i, 0)
+        if formscan.byte_safe(b)
+            list.push(out, b)
+        else if b == ' '
+            list.push(out, '+')
+        else
+            list.push(out, '%')
+            list.push(out, formscan.hex_digit(b >> 4))
+            list.push(out, formscan.hex_digit(b & 15))
+    bytes.byte_list_to_str(out)
 
-// One string percent-decoded under the form rules: `+` is a space, a
-// bad `%` is a literal `%`.
+// One string decoded under the form rules: `+` is a space, `%XX` is the
+// byte it spells, and a `%` that begins no escape is kept.  `&` and `=`
+// are ordinary bytes here.
 pub fn decode(value: Str) -> Str []
-    todo("form-nv.formurl.decode")
+    let b = bytes.from_str(value)
+    bytes.to_str(decode_span(b, FormSpan { start: 0, end: bytes.len(b) }))
 
-// Whether a string would survive `encode` unchanged.
-//
-// The question a caller asks before deciding whether writing a field
-// costs an allocation.
+// Whether `encode` answers a string unchanged: every byte is one
+// `formscan.byte_safe` admits.
 pub fn is_safe(value: Str) -> Bool []
-    todo("form-nv.formurl.is_safe")
+    for i in 0..str.len(value)
+        if not formscan.byte_safe(str.byte_at_or(value, i, 0))
+            return false
+    true
 
-// ── The scanner, for a caller that drives its own walk ───────────────
+// ── The scanner ──────────────────────────────────────────────────────
 
-// The scan after feeding a whole body, for a caller that wants the
-// scanner's answer without the pair list.
-//
-// The bridge to `formscan`: this module's parse IS that scanner with
-// the spans collected, and this call is how a host caller reaches the
-// device half without writing the loop.
+// The scan after feeding a whole body and ending it.
 pub fn scan_all(body: Bytes) -> formscan.FormScan []
-    todo("form-nv.formurl.scan_all")
+    var s = formscan.scan()
+    for i in 0..bytes.len(body)
+        s = formscan.scan_byte(s, bytes.byte_at(body, i) ?? 0)
+    formscan.scan_end(s)
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+// The pairs of a body, or `None` once more than `limit` fields close.
+fn walk(body: Bytes, limit: Int) -> ?FormBody
+    var pairs: [FormPair] = []
+    var s = formscan.scan()
+    var key_end = 0 - 1
+    let n = bytes.len(body)
+    for i in 0..n + 1
+        let start = formscan.scan_field_start(s)
+        if i < n
+            s = formscan.scan_byte(s, bytes.byte_at(body, i) ?? 0)
+        else
+            s = formscan.scan_end(s)
+        if formscan.scan_key_done(s)
+            key_end = i
+        if formscan.scan_field_done(s)
+            if list.len(pairs) >= limit
+                return None
+            list.push(pairs, pair_of(start, key_end, i))
+        if formscan.scan_field_start(s) != start
+            key_end = 0 - 1
+    Some(FormBody { bytes: body, pairs: pairs, had_bad_escape: formscan.scan_bad_escape(s) })
+
+// The pair of a field from `start` to `end`, whose `=` is at `eq`, or
+// -1 when it has none.
+fn pair_of(start: Int, eq: Int, end: Int) -> FormPair
+    if eq < 0
+        return FormPair { key: FormSpan { start: start, end: end },
+                          value: FormSpan { start: end, end: end }, had_assigner: false }
+    FormPair { key: FormSpan { start: start, end: eq },
+               value: FormSpan { start: eq + 1, end: end }, had_assigner: true }
+
+// How many encoded bytes the decoded byte at `i` takes: 3 for a valid
+// escape, 1 otherwise.
+fn escape_width(b: Bytes, i: Int, end: Int) -> Int
+    if i + 2 >= end or (bytes.byte_at(b, i) ?? 0) != '%'
+        return 1
+    let hi = formscan.hex_value(bytes.byte_at(b, i + 1) ?? 0)
+    let lo = formscan.hex_value(bytes.byte_at(b, i + 2) ?? 0)
+    if hi >= 0 and lo >= 0
+        return 3
+    1
+
+// The decoded bytes of a span.
+fn decode_span(b: Bytes, s: FormSpan) -> Bytes
+    var out: [Int] = []
+    var i = s.start
+    for _ in s.start..s.end
+        if i >= s.end
+            break
+        let w = escape_width(b, i, s.end)
+        let c = bytes.byte_at(b, i) ?? 0
+        if w == 3
+            let hi = formscan.hex_value(bytes.byte_at(b, i + 1) ?? 0)
+            list.push(out, hi * 16 + formscan.hex_value(bytes.byte_at(b, i + 2) ?? 0))
+        else if c == '+'
+            list.push(out, ' ')
+        else
+            list.push(out, c)
+        i = i + w
+    bytes.from_byte_list(out)
+
+// How many bytes `encode` writes for a string.
+fn encoded_size(value: Str) -> Int
+    var n = 0
+    for i in 0..str.len(value)
+        n = n + formscan.encoded_len(str.byte_at_or(value, i, 0))
+    n
+
+// A string encoded into a buffer at `at`, answering the offset after it.
+fn encode_into(var out: Bytes, at: Int, value: Str) -> Int
+    var k = at
+    for i in 0..str.len(value)
+        let b = str.byte_at_or(value, i, 0)
+        if formscan.byte_safe(b)
+            bytes.set_u8(out, k, b)
+            k = k + 1
+        else if b == ' '
+            bytes.set_u8(out, k, '+')
+            k = k + 1
+        else
+            bytes.set_u8(out, k, '%')
+            bytes.set_u8(out, k + 1, formscan.hex_digit(b >> 4))
+            bytes.set_u8(out, k + 2, formscan.hex_digit(b & 15))
+            k = k + 3
+    k

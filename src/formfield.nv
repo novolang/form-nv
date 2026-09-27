@@ -332,23 +332,17 @@ fn check_one(b: formurl.FormBody, e: FormExpect) -> ?formerr.FormError
             return Some(FormMissing(e.name))
         return None
     match e.kind
-        FormKindStr   =>
-            match get_str_bounded(b, e.name, bound_of(e))
-                Ok(_)  => None
-                Err(x) => Some(x)
-        FormKindInt   =>
-            match read_int(b, e)
-                Ok(_)  => None
-                Err(x) => Some(x)
-        FormKindBool  =>
-            match get_bool(b, e.name)
-                Ok(_)  => None
-                Err(x) => Some(x)
-        FormKindFloat =>
-            match get_float(b, e.name)
-                Ok(_)  => None
-                Err(x) => Some(x)
+        FormKindStr   => refusal_of(get_str_bounded(b, e.name, bound_of(e)))
+        FormKindInt   => refusal_of(read_int(b, e))
+        FormKindBool  => refusal_of(get_bool(b, e.name))
+        FormKindFloat => refusal_of(get_float(b, e.name))
         FormKindList  => None
+
+// A read's refusal, or `None` when the read succeeded.
+fn refusal_of<T>(r: Result<T, formerr.FormError>) -> ?formerr.FormError
+    match r
+        Ok(_)  => None
+        Err(x) => Some(x)
 
 // An integer expectation's read: bounded when `min <= max`.
 fn read_int(b: formurl.FormBody, e: FormExpect) -> Result<Int, formerr.FormError>

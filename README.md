@@ -9,12 +9,6 @@ specified by [RFC 7578](https://www.rfc-editor.org/rfc/rfc7578), and is
 how a file upload arrives. This package reads both from bytes the
 caller already holds, and writes the first.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is
-declared with its full signature, but every body is a `todo()` that
-panics when called. The package is published so its design can be
-reviewed and depended on before it is implemented. Version 0.1.0 will
-be the first working release.
-
 ## What a form body is
 
 A browser posting a form with no file inputs sends
@@ -22,7 +16,7 @@ A browser posting a form with no file inputs sends
 separated by `&`, a key is separated from its value by `=`, a space is
 written as `+`, and any other byte outside a small safe set is written
 as `%` and two hexadecimal digits. Section 5.1 of the standard is the
-parser and section 5.3 is the serialiser.
+parser and section 5.2 is the serialiser.
 
 A key may appear more than once. A checkbox group, a multi-select and a
 repeated query parameter all send that, so a body is an ordered list of
@@ -44,8 +38,8 @@ Each part carries a `Content-Disposition: form-data` header with a
 may carry its own `Content-Type`. A file part without one is
 `text/plain` (section 4.4).
 
-This package reads a multipart body as a stream of **events**. A body
-chunk arrives as a start and an end index into the chunk the caller
+This package reads a multipart body as a stream of **events**. A piece
+of a part's body arrives as a start and an end index into the bytes
 just fed, so the parser holds no part and no part's bytes. Whether to
 accumulate a part in memory is then the caller's decision rather than
 the client's.
@@ -86,10 +80,7 @@ fn main() [io]
         Err(e) => println("${formerr.status_for(e)} ${e.message()}")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: form-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -119,9 +110,10 @@ caller writes into a fixed buffer of its own. See "Running on a
 microcontroller".
 
 **`formpart.feed` and `take` are the multipart reader.** `feed` takes a
-chunk and answers the next event with the reader to use next. `drain`
-is `feed` followed by `take` until the events stop, which is the loop
-most callers want. `finish` ends the body.
+chunk and answers the next event with the reader to use next and the
+bytes the event's range indexes. `drain` is `feed` followed by `take`
+until the events stop, which is the loop most callers want. `finish`
+ends the body.
 
 **`formpart.collect` reads a whole multipart body into a list of
 parts.** Use it when the whole body is already in memory: a test, a
@@ -149,12 +141,15 @@ there is no variant without them.
    `Content-Type` parameter is the boundary. The delimiter on the wire
    is `--` and then the boundary (RFC 2046 section 5.1.1).
    `formpart.boundary_of` extracts it from the header value.
-6. **A `FormBodyChunk` event is a range into the chunk just fed**, not
-   bytes the reader owns. Read or copy it before feeding the next
-   chunk. `formpart.pending_bytes` is what the reader is holding, and
-   it is at most the boundary's length plus four, which is the longest
-   boundary prefix that can straddle two chunks.
-7. **One call to `feed` produces one event.** A single read from a
+6. **A `FormBodyChunk` event is a range into the step's `data`**, not
+   bytes the reader owns. `data` is the chunk just fed, unless the
+   reader held back the end of the chunk before because it could have
+   been the start of a delimiter. Then it is those bytes followed by
+   the chunk. Read or copy a range before feeding the next chunk.
+   `formpart.pending_bytes` is what the reader holds between chunks: at
+   most the boundary's length plus three bytes in a part's body, and
+   at most `max_headers_bytes` in a header section that has not ended.
+7. **One call to `feed` or `take` produces one event.** A single read from a
    socket can complete several. Call `take` until it stops, or call
    `drain`, which is that loop written once.
 8. **The limits refuse at the byte the bound is crossed.** A limit
@@ -208,19 +203,20 @@ build. Here the claim covers `formscan` and nothing else.
 
 `FormScan` is four integers in a `@value` struct, carried in the
 caller's own stack frame. `scan_byte` takes one byte and answers the
-decoded byte with the position, so decoding is part of the walk and no
-encoded copy is ever built. A firmware serving its own configuration
-page receives `ssid=home&psk=hunter2&chan=6` and writes each decoded
-byte straight into a fixed buffer.
+bytes it decoded, so decoding is part of the walk and no encoded copy
+is ever built. A step answers up to three decoded bytes: a `%` that
+turns out to begin no escape is written out, with the digit after it,
+on the step that shows it. `scan_out_count` and `scan_out_at` read
+them. A firmware serving its own configuration page receives
+`ssid=home&psk=hunter2&chan=6` and writes each decoded byte straight
+into a fixed buffer.
 
-```bash
-novo build --target=nrf52-qemu tests/embedded_probe.nv
-```
-
-That command builds a Cortex-M4 executable today, against `formscan`
-alone. It links the signatures and the types rather than a decoder,
-because every body under `src/` is still a `todo()`. Keeping it green
-once the bodies land is part of the implementation.
+`tests/embedded_probe.nv` walks bodies with `formscan` in a firmware
+image. Copied into a package with `formscan` alone, it builds for a
+Cortex-M4 with `novo build --target=nrf52-qemu` and prints
+`PASS: form-embedded` under QEMU. `tests/alloc_scan.sh` reads the
+emitted LLVM and checks that no function in `formscan` calls the
+allocator.
 
 `formurl`, `formpart`, `formfield` and `formerr` are outside the claim.
 Each names `Bytes` or builds a list, and one host-only function
@@ -250,6 +246,9 @@ caller stricter than the standard finds out.
   optional.
 - **Query-string parsing to urllib's rules.** See "Related packages".
 - **A device build of anything but `formscan`.** See above.
+- **UTF-8 replacement.** The WHATWG parser replaces an invalid UTF-8
+  sequence with U+FFFD.  This package answers the bytes as sent, and
+  `formurl.value_bytes` answers them as `Bytes`.
 
 ## Related packages
 
@@ -283,63 +282,29 @@ caller stricter than the standard finds out.
 ## Tests
 
 ```bash
-novo test tests/formurl_tests.nv       # the WHATWG parser and serialiser
-novo test tests/formpart_tests.nv      # the boundary, the events, the limits
-novo test tests/formfield_tests.nv     # typed reads and the expectation list
+novo test tests/formurl_tests.nv        # the WHATWG parser and serialiser, and the scanner
+novo test tests/formpart_tests.nv       # the boundary, the events, the limits
+novo test tests/formfield_tests.nv      # typed reads and the expectation list
+novo test tests/formerr_tests.nv        # the refusals and their statuses
+novo test tests/differential_tests.nv   # Python's urllib.parse and email packages
+bash tests/coverage.sh                  # line coverage over src/
+bash tests/alloc_scan.sh                # nothing in formscan allocates
 ```
 
-The urlencoded vectors are the WHATWG's own web-platform tests for
-`urlencoded` parsing and serialising. The reference implementation for
-the API shape is the Rust crate `serde_urlencoded`. The multipart
-vectors are the Rust crate `multipart`'s fixture bodies, with RFC 7578
-for the part headers and RFC 2046 section 5.1.1 for the boundary
-grammar.
+The urlencoded vectors are the web-platform-tests file
+`url/urlencoded-parser.any.js`, less the cases whose answer holds
+U+FFFD. The multipart vectors are the HTML 4.01 example that RFC 7578
+descends from, RFC 7578 section 4.4's example, and the four cases every
+multipart parser is measured on: a boundary string inside a part's
+body, a header section split across two chunks, a body with no closing
+`--`, and a `filename` holding a path.
 
-The suite asserts the four cases every multipart parser is measured on:
-a boundary string appearing inside a part's body, a part whose headers
-straddle two fed chunks, a body with no closing `--`, and a `filename`
-containing a path separator. It also asserts that a repeated key keeps
-every value in order, that a field with no `=` is a key with an empty
-value, that each limit refuses at the byte it is crossed, and that
-`check` answers every failed expectation.
-
-`tests/embedded_probe.nv` is the program that shows `formscan` builds
-for a microcontroller with no heap allocator. It builds a Cortex-M4
-executable against `formscan` alone.
-
-The tests compile today and fail at run, each on the
-`not implemented: form-nv.<module>.<fn>` panic that is its body. That is
-the expected state of an interface release. They turn green one at a
-time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `formscan.FormScan` and the other types in every module | the types are declared |
-| `formscan.scan`, `.scan_byte`, `.scan_end` | no |
-| `formscan.scan_emitted`, `.scan_out`, `.scan_in_key`, `.scan_key_done`, `.scan_field_done` | no |
-| `formscan.scan_pos`, `.scan_field_start`, `.scan_fields`, `.scan_has_value` | no |
-| `formscan.scan_in_escape`, `.scan_bad_escape` | no |
-| `formscan.separator`, `.assigner`, `.plus_means`, `.hex_value`, `.hex_digit`, `.byte_safe`, `.encoded_len` | no |
-| `formurl.parse`, `.parse_str`, `.parse_bounded`, `.scan_all` | no |
-| `formurl.get`, `.get_all`, `.has`, `.count`, `.keys` | no |
-| `formurl.key_str`, `.value_str`, `.value_bytes`, `.span_bytes`, `.decoded_len` | no |
-| `formurl.serialise`, `.serialise_into`, `.serialised_len`, `.encode`, `.decode`, `.is_safe` | no |
-| `formpart.default_limits`, `.small_form_limits`, `.reader` | no |
-| `formpart.boundary_of`, `.boundary_of_type`, `.boundary_ok` | no |
-| `formpart.feed`, `.take`, `.drain`, `.finish` | no |
-| `formpart.phase_of`, `.part_count`, `.total_bytes`, `.is_complete`, `.pending_bytes` | no |
-| `formpart.content_type_or_default`, `.filename_is_safe` | no |
-| `formpart.headers_of`, `.header_name`, `.header_value`, `.header` | no |
-| `formpart.collect`, `.part_named`, `.parts_named` | no |
-| `formfield.get_str`, `.get_int`, `.get_int_between`, `.get_float`, `.get_or`, `.get_str_bounded`, `.get_one_of` | no |
-| `formfield.get_bool`, `.checkbox` | no |
-| `formfield.get_list`, `.get_list_required`, `.get_int_list` | no |
-| `formfield.expect_str`, `.expect_int`, `.expect_int_between`, `.expect_bool`, `.optional` | no |
-| `formfield.check`, `.is_valid`, `.unexpected_keys`, `.bracket_names`, `.bracket_base` | no |
-| `formerr.error_field`, `.is_limit`, `.status_for`, `.error_at`, `.messages`, `.any_limit` | no |
-| `formerr.FormError.message` | no |
+`tests/differential_tests.nv` is written by `tools/differential.py`.
+Python's `urllib.parse.parse_qsl` reads 40 random urlencoded bodies,
+its `urlencode` writes 30 random pair lists, and its `email` package
+reads 12 random multipart bodies. Each answer is compared with this
+package's. The tool's docstring names the cases where Python and the
+WHATWG standard differ and leaves them out.
 
 ## Licence
 

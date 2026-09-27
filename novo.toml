@@ -1,27 +1,23 @@
 [package]
 name        = "form-nv"
-version     = "0.0.2"
-description = "HTML form bodies decoded from bytes: `application/x-www-form-urlencoded` to the WHATWG parser and serialiser, and `multipart/form-data` as a feed-and-drain parser that answers part headers and body chunks as RANGES into the caller's own buffer and never holds a part, with per-part and total limits that make it refuse rather than grow.  Typed field extraction whose errors name the field.  The urlencoded scanner is `@value` state and builds for a device.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "HTML form bodies decoded from bytes: `application/x-www-form-urlencoded` to the WHATWG parser and serialiser, as ranges into the caller's own bytes, and `multipart/form-data` as a feed-and-drain reader that answers part headers and body ranges and never holds a part, with per-part and total limits that refuse rather than grow.  Typed field reads whose refusals name the field.  The urlencoded scanner is `@value` state and builds for a microcontroller."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+# `experimental` because no program outside this repository has used the
+# package yet, and the tests were written against the signatures rather
+# than by a consumer.
+stability   = "experimental"
 
-# `core`.  A form body is bytes the caller already holds — the socket
-# that received them belongs to the server — and decoding one is
-# arithmetic over those bytes.  The multipart half is a feed-and-drain
-# state machine, which is how a `core` package takes a stream it must
-# not accumulate (`docs/publishing.md` § How a `core` package takes
-# bytes from its host).
+# `core`.  A form body is bytes the caller already holds, and decoding
+# one is arithmetic over them.  The multipart reader is fed chunks and
+# answers events, which is how a `core` package takes a stream it must
+# not accumulate.
 #
-# It carries `tests/embedded_probe.nv`, so the device claim is BUILT.
-# `formscan` is the half the claim covers — the urlencoded scanner as
-# four integers in a `@value` struct, which is what a firmware serving
-# a configuration page needs and what `str.split` cannot give it.
+# `formscan` builds for a microcontroller.  `tests/embedded_probe.nv`
+# is the firmware image that shows it, and `tests/alloc_scan.sh` reads
+# the emitted LLVM and checks that no function in `formscan` calls the
+# allocator.
 layer       = "core"
 
 category    = "web"
@@ -29,7 +25,7 @@ category    = "web"
 tags        = ["form", "urlencoded", "multipart", "form-data", "http", "upload", "sans-io", "embedded"]
 repository  = "https://github.com/novolang/form-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.13.0"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.
@@ -38,28 +34,12 @@ novo        = ">= 0.8.9"
 "README.md" = "A parser that never holds a part, and a scanner that fits in four integers"
 
 [dependencies]
-# mime-nv, for the BOUNDARY and for nothing else.
+# mime-nv, for the boundary.  It is a parameter of the `Content-Type`
+# header, and reading it is RFC 2045's token and quoted-string grammar.
+# `formpart.boundary_of` and `boundary_of_type` are the whole of the
+# dependency's use; `formscan` does not name it.
 #
-# A multipart body is unreadable without the boundary, the boundary is a
-# parameter of the `Content-Type` header, and parsing that header is
-# RFC 2045's token and quoted-string grammar rather than a split on `;`.
-# `mimetype.boundary(input, m)` is exactly that call, and a package that
-# re-implemented it would be a second grammar for the one header this
-# package cannot do without — and would get the quoted form wrong, which
-# is the form a boundary containing a `:` or a space has to take.
-#
-# `formpart.boundary_of` is the whole of the dependency's use, and it is
-# in its own function so that a caller who already has the boundary —
-# a server that parsed the header itself, a device with an eight-line
-# parser — never touches mime-nv at all.  `formscan` does not name it,
-# which is what keeps the device claim free of it.
-mime-nv = "^0.0.1"
-
-# url-nv is NOT here, and the absence is a finding rather than an
-# oversight.  Its `qs` module already parses query strings — but to
-# urllib's rules, and this package implements the WHATWG URL Standard's
-# `application/x-www-form-urlencoded` parser, which differs in four
-# places a test can see.  § The overlap with url-nv in the README lists
-# them.  Taking the dependency would also cost the device claim: the
-# embedded probe builds everything the modules it names depend on, and
-# url-nv's parse allocates.
+# url-nv is not a dependency.  Its `qs` module parses query strings to
+# Python urllib's rules, and this package implements the WHATWG parser,
+# which differs in the four places the README lists.
+mime-nv = "^0.1.0"

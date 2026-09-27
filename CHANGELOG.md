@@ -5,6 +5,54 @@ All notable changes to form-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-09-27
+
+The first implementation of the interface published as 0.0.1: the
+WHATWG urlencoded parser and serialiser, the multipart reader with its
+limits, typed field reads and the refusals.
+
+### Added
+
+- `formscan.scan_out_count` and `scan_out_at` answer every decoded byte
+  of a step.  A `%` that turns out to begin no escape is written out
+  with the digit after it and the byte that showed it, so one step can
+  decode up to three bytes.  `scan_out` is the first of them.
+- `FormStep.data` and `FormDrained.data` are the bytes an event's
+  ranges index.
+- `tests/formerr_tests.nv`, and `tests/differential_tests.nv`, which
+  checks the urlencoded parser and serialiser against Python's
+  `urllib.parse` and the multipart reader against its `email` package,
+  written by `tools/differential.py`.
+- `tests/alloc_scan.sh` checks the emitted LLVM for an allocation in
+  `formscan`, with a negative control that must be caught.
+
+### Changed
+
+These break code written against 0.0.x.
+
+- A `FormBodyChunk` range and a `FormHeaderField` range index the
+  step's `data`, not the chunk fed.  The two are the same buffer unless
+  the reader held back the end of the previous chunk, which it does
+  when that end could be the start of a delimiter, and in a header
+  section that has not ended.  `pending_bytes` is at most the
+  boundary's length plus three in a part's body, and at most
+  `max_headers_bytes` in a header section.
+- `FormReader`'s fields describe the reader and changed with it.
+- `formurl.serialise_into` takes its buffer as `var out: Bytes`, since
+  it writes into it.
+- `formscan.scan_fields` and `scan_field_done` count non-empty fields
+  only, as `formurl.parse` does.
+- `formpart.boundary_of` refuses a boundary outside RFC 2046's
+  `bchars`, such as one holding `;`.
+- `formpart.filename_is_safe` refuses a `\` as well as a `/`.
+
+### Toolchain
+
+- The toolchain floor is 0.13.0, and mime-nv is `^0.1.0`.
+- `formfield.check` matches each read's `Result` where it is made.  The
+  0.13.0 compiler frees a `Result` payload that a helper function
+  answers wrapped in `Some`.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.

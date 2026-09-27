@@ -13,7 +13,7 @@ APIDOC.md
 # for when it grows a `main` and it does.
 /form-nv
 
-# The resolved dependency graph.  A library pins nothing for its
-# consumers — a consumer resolves its own — so the lock is a local
-# build artefact rather than a fact about the release.
-novo.lock
+# novo.lock is committed.  A consumer resolves its own closure and never
+# reads a dependency's lock, so committing it costs nobody anything and
+# makes this repository's builds reproducible.  It is not on the publish
+# allow-list, so it never ships.
